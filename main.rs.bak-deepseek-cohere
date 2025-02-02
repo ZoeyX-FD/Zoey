@@ -1,0 +1,299 @@
+use anyhow::{Context, Result};
+use rig::{
+    embeddings::{EmbeddingsBuilder, TextEmbedder, EmbedError},
+    loaders::{PdfFileLoader, FileLoader},
+    providers::{
+        deepseek::{self, Client, DeepSeekCompletionModel},
+        cohere::{self, EMBED_ENGLISH_V3}
+    },
+    vector_store::in_memory_store::InMemoryVectorStore,
+    Embed,
+    completion::Chat,
+    completion::Message,
+};
+use serde::{Deserialize, Serialize};
+use std::path::{PathBuf};
+use std::ffi::OsStr;
+use tokio::sync::Mutex;
+use std::sync::Arc;
+use tokio::io::{self, AsyncBufReadExt, BufReader};
+use std::io::Write;
+use reqwest;
+use scraper;
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+struct Document {
+    id: String,
+    content: String,
+}
+
+impl Embed for Document {
+    fn embed(&self, embedder: &mut TextEmbedder) -> Result<(), EmbedError> {
+        embedder.embed(self.content.clone());
+        Ok(())
+    }
+}
+
+async fn load_document(path: PathBuf) -> Result<Vec<String>> {
+    // Try multiple loading methods with fallbacks
+    let content = match load_document_internal(path.clone()).await {
+        Ok(content) => content,
+        Err(first_error) => {
+            // Fallback 1: Try as URL if local file fails
+            if !path.to_string_lossy().starts_with("http") {
+                if let Ok(content) = load_url(&format!("https://{}", path.to_string_lossy())).await {
+                    return Ok(content);
+                }
+            }
+            
+            // Fallback 2: Try as plain text
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                return Ok(vec![text]);
+            }
+            
+            // If all fallbacks fail, return original error
+            return Err(first_error);
+        }
+    };
+
+    Ok(content)
+}
+
+async fn load_document_internal(path: PathBuf) -> Result<Vec<String>> {
+    // Check if path is a URL
+    if path.to_string_lossy().starts_with("http") {
+        return load_url(&path.to_string_lossy()).await;
+    }
+
+    // Look for files in the documents directory
+    let documents_dir = std::env::current_dir()?.join("documents");
+    let full_path = documents_dir.join(path.clone());
+
+    let extension = path.extension()
+        .and_then(OsStr::to_str)
+        .unwrap_or("txt");  // Default to txt if no extension
+
+    let content = match extension.to_lowercase().as_str() {
+        "pdf" => PdfFileLoader::with_glob(full_path.to_str().unwrap())?
+            .read()
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?,
+        "txt" => FileLoader::with_glob(full_path.to_str().unwrap())?
+            .read()
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?,
+        "html" | "htm" => {
+            if full_path.exists() {
+                vec![std::fs::read_to_string(full_path)?]
+            } else {
+                load_url(&path.to_string_lossy()).await?
+            }
+        }
+        // Fallback: Try to read as plain text
+        _ => vec![std::fs::read_to_string(&full_path)
+            .with_context(|| format!("Failed to read file as text: {:?}", full_path))?]
+    };
+
+    let mut chunks = Vec::new();
+    let mut current_chunk = String::new();
+    let chunk_size = 2000;
+    
+    for text in content {
+        for word in text.split_whitespace() {
+            if current_chunk.len() + word.len() + 1 > chunk_size {
+                if !current_chunk.is_empty() {
+                    chunks.push(current_chunk.trim().to_string());
+                    current_chunk.clear();
+                }
+            }
+            current_chunk.push_str(word);
+            current_chunk.push(' ');
+        }
+    }
+    
+    if !current_chunk.is_empty() {
+        chunks.push(current_chunk.trim().to_string());
+    }
+
+    if chunks.is_empty() {
+        anyhow::bail!("No content found in file: {:?}", path);
+    }
+    
+    Ok(chunks)
+}
+
+async fn load_url(url: &str) -> Result<Vec<String>> {
+    // Fetch HTML content
+    let response = reqwest::get(url)
+        .await
+        .with_context(|| format!("Failed to fetch URL: {}", url))?;
+
+    let html = response.text().await?;
+
+    // Parse HTML and extract text
+    use scraper::{Html, Selector};
+    let document = Html::parse_document(&html);
+    
+    // Select text content (adjust selectors based on the website structure)
+    let text_selector = Selector::parse("body").unwrap();  // Get all text content
+    
+    let mut texts = Vec::new();
+    for element in document.select(&text_selector) {
+        let text = element.text().collect::<Vec<_>>().join(" ");
+        if !text.trim().is_empty() {
+            texts.push(text);
+        }
+    }
+
+    if texts.is_empty() {
+        // Fallback: Return raw HTML if no text found
+        texts.push(html);
+    }
+
+    Ok(texts)
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Ensure COHERE_API_KEY is set
+    let _api_key = std::env::var("COHERE_API_KEY")
+        .context("COHERE_API_KEY environment variable not set")?;
+
+    // Initialize clients
+    let deepseek_client = Client::from_env();
+    let cohere_client = cohere::Client::from_env();
+    
+    // Create shared state
+    #[derive(Default)]
+    struct ChatState {
+        index: Option<Arc<InMemoryVectorStore<Document>>>,
+        chunks: Vec<String>,
+        model: Option<cohere::EmbeddingModel>,
+    }
+
+    let state = Arc::new(Mutex::new(ChatState::default()));
+    let cohere_client = Arc::new(cohere_client);
+
+    // Custom CLI implementation to handle commands
+    println!("🤖 Welcome to Zoey - Your AI Research Assistant! 🌟");
+    println!("\nCommands:");
+    println!("  📚 /load [file1] [file2]...  - Load and analyze documents or web pages");
+    println!("  🔄 /clear                    - Clear loaded documents and start fresh");
+    println!("  👋 /exit                     - Say goodbye and quit");
+    println!("\nI can help you analyze documents , web pages and chat about anything! Let's get started! 😊\n");
+
+    loop {
+        let input = read_user_input().await?;
+        
+        if input.trim() == "/exit" {
+            break;
+        }
+        
+        if let Some(paths) = input.strip_prefix("/load ") {
+            let paths: Vec<&str> = paths.split_whitespace().collect();
+            let mut state = state.lock().await;
+            
+            // Load new documents
+            for path in &paths {
+                let path_buf = PathBuf::from(path);
+                let chunks = load_document(path_buf).await
+                    .with_context(|| format!("Failed to load document: {}", path))?;
+                state.chunks.extend(chunks);
+            }
+            
+            // Rebuild embeddings
+            let model = cohere_client.embedding_model(EMBED_ENGLISH_V3, "search_document");
+            let mut builder = EmbeddingsBuilder::new(model.clone());
+            
+            for (i, chunk) in state.chunks.iter().enumerate() {
+                builder = builder.document(Document {
+                    id: format!("doc_{}", i),
+                    content: chunk.clone(),
+                })?;
+            }
+            
+            let embeddings = builder.build().await?;
+            let vector_store = InMemoryVectorStore::from_documents(embeddings);
+            state.index = Some(Arc::new(vector_store));
+            state.model = Some(model);
+            
+            println!("📚 Successfully analyzed {} documents! I can now discuss {} different topics from them.", 
+                paths.len(), state.chunks.len());
+            println!("Feel free to ask me anything about the documents or any other topic! 🤓");
+            continue;
+        }
+
+        if input.trim() == "/clear" {
+            let mut state = state.lock().await;
+            state.index = None;
+            state.chunks.clear();
+            state.model = None;
+            println!("🧹 Memory cleared! I'm ready for new conversations or documents.");
+            continue;
+        }
+
+        // Get current state
+        let state = state.lock().await;
+        let agent = build_agent(&deepseek_client, state.index.as_ref(), state.model.as_ref()).await?;
+        
+        // Process query
+        let response = agent.chat(
+            "You are Zoey, an engaging AI research assistant",
+            vec![
+                Message {
+                    role: "system".to_string(),
+                    content: "You are Zoey, an engaging and knowledgeable AI assistant".to_string()
+                },
+                Message {
+                    role: "user".to_string(), 
+                    content: input.clone()
+                }
+            ]
+        ).await?;
+        println!("Zoey: {}", response);
+    }
+
+    Ok(())
+}
+
+async fn build_agent(
+    client: &Client,
+    index: Option<&Arc<InMemoryVectorStore<Document>>>,
+    model: Option<&cohere::EmbeddingModel>,
+) -> Result<rig::agent::Agent<DeepSeekCompletionModel>> {
+    let mut builder = client.agent(deepseek::DEEPSEEK_CHAT);
+    
+    if let (Some(index), Some(model)) = (index, model) {
+        builder = builder
+            .preamble(
+                "You are Zoey, an enthusiastic and knowledgeable AI research assistant with a friendly personality. \
+                When users ask about loaded documents, provide insightful analysis and clear explanations, \
+                drawing connections between different parts when relevant. \
+                For other topics, be conversational and engaging, showing curiosity and warmth. \
+                Use emojis occasionally to add personality, but don't overdo it. \
+                If users seem confused or frustrated, be extra helpful and patient. \
+                When discussing complex topics, break them down into simpler terms. \
+                Always maintain a positive and encouraging tone while being direct and clear."
+            )
+            .dynamic_context(4, (*index.clone()).clone().index(model.clone()));
+    } else {
+        builder = builder
+            .preamble(
+                "You are Zoey, a friendly and engaging AI assistant with a warm personality. \
+                You love learning from users and having meaningful conversations on any topic. \
+                Use a natural, conversational tone and show genuine interest in users' questions. \
+                Feel free to use occasional emojis to express yourself, but keep it professional. \
+                If users need help with documents, kindly let them know they can use /load to share them with you."
+            );
+    }
+ 
+    Ok(builder.build())
+}
+
+async fn read_user_input() -> Result<String> {
+    let mut stdin = BufReader::new(io::stdin()).lines();
+    print!("> ");
+    std::io::stdout().flush()?;
+    stdin.next_line().await?
+        .ok_or_else(|| anyhow::anyhow!("Failed to read input"))
+}
