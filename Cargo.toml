@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "zoey",      # Agent Research with doc and web intelligence
+    "common",    # Shared functionality
+    "crypto-agents", # Coingecko Research agent intelligence
+]
+resolver = "2"
+
