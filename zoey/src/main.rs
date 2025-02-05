@@ -2,48 +2,69 @@ use anyhow::{Context, Result};
 use rig::{
     embeddings::EmbeddingsBuilder,
     providers::{
-        deepseek::{self, Client, DeepSeekCompletionModel},
         cohere::{self, EMBED_ENGLISH_V3}
     },
-    vector_store::in_memory_store::InMemoryVectorStore,
-    completion::Chat,
-    completion::Message,
+    completion::{Message, Chat, PromptError},
 };
+
+use common::{
+    document_loader::DocumentLoader,
+    storage::StorageManager,
+    mistral::{self, Client, MistralCompletionModel}
+};
+
+use rig_sqlite::SqliteVectorStore;
+use rusqlite::ffi::sqlite3_auto_extension;
+use sqlite_vec::sqlite3_vec_init;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{self, AsyncBufReadExt, BufReader};
+use tokio::sync::RwLock;
 use std::io::Write;
 use reqwest;
 use scraper;
 use tokio::time::timeout;
 use std::time::Duration;
-use tracing::{info, warn, error};
+use tracing::{info, warn};
 use futures::future::join_all;
 use parking_lot::Mutex as PLMutex;
-use std::time::Instant;
-
+use tokio_rusqlite::Connection;
 
 // Import from our common crate
-use common::{Document, document_loader::DocumentLoader};
+use common::Document;
 
+// Add chrono to the imports at the top
+use chrono;
+
+// Add this struct to track document metadata
+#[derive(Debug, Clone)]
+struct DocumentMetadata {
+    id: String,
+    source: String,
+    timestamp: chrono::DateTime<chrono::Local>,
+    chunk_count: usize,
+}
+
+// Modify ChatState to handle async initialization
 struct ChatState {
-    index: PLMutex<Option<Arc<InMemoryVectorStore<Document>>>>,
-    chunks: PLMutex<Vec<String>>,
-    model: PLMutex<Option<cohere::EmbeddingModel>>,
+    storage: Arc<RwLock<StorageManager>>,
     chat_history: PLMutex<Vec<Message>>,
 }
 
-impl Default for ChatState {
-    fn default() -> Self {
-        Self {
-            index: PLMutex::new(None),
-            chunks: PLMutex::new(Vec::new()),
-            model: PLMutex::new(None),
+impl ChatState {
+    async fn new() -> Result<Self> {
+        let storage = StorageManager::new("zoey.db").await?;
+        
+        // Create tables with proper schema
+        storage.initialize_tables().await?;
+        
+        Ok(Self {
+            storage: Arc::new(RwLock::new(storage)),
             chat_history: PLMutex::new(vec![Message {
                 role: "system".to_string(),
                 content: "You are Zoey, an engaging and knowledgeable AI assistant".to_string()
             }]),
-        }
+        })
     }
 }
 
@@ -102,85 +123,167 @@ fn chunk_content(content: &[String], chunk_size: usize) -> Result<Vec<String>> {
 }
 
 async fn load_url(url: &str) -> Result<Vec<String>> {
-    // Create a client with custom user agent
+    // Create a client with better headers to mimic a real browser
     let client = reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+        .default_headers({
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8".parse().unwrap());
+            headers.insert("Accept-Language", "en-US,en;q=0.5".parse().unwrap());
+            headers.insert("Connection", "keep-alive".parse().unwrap());
+            headers
+        })
         .build()?;
 
-    // Fetch HTML content - fix the await placement
-    let response = client.get(url).send().await
+    // Fetch HTML content with better error handling
+    let response = client.get(url)
+        .send()
+        .await
         .with_context(|| format!("Failed to fetch URL: {}", url))?;
 
-    // Get the response text as a String
+    info!("Response status: {}", response.status());
+
+    // Get the response text
     let html = response.text().await?;
-    let document = scraper::Html::parse_document(&html);
     
-    // Define selectors for common content areas
-    let selectors = [
-        // Main content selectors
-        ("article", 10),
-        ("main", 8),
-        (".content", 7),
-        ("#content", 7),
-        // Navigation and header content (lower priority)
-        ("p", 5),
-        ("h1, h2, h3, h4, h5, h6", 4),
-        // Fallback to body if nothing else matches
-        ("body", 1),
-    ];
+    info!("Retrieved HTML length: {} bytes", html.len());
+    
+    let document = scraper::Html::parse_document(&html);
 
     let mut texts = Vec::new();
     
-    // Process each selector in priority order
-    for (selector_str, priority) in selectors.iter() {
+    // Add URL and timestamp as context
+    texts.push(format!("Source URL: {} (Loaded at: {})", 
+        url, 
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+    ));
+
+    // Extract title first
+    if let Ok(title_selector) = scraper::Selector::parse("title") {
+        if let Some(title) = document.select(&title_selector).next() {
+            let title_text = clean_text(&title.text().collect::<String>());
+            if !title_text.is_empty() {
+                texts.push(format!("Page Title: {}", title_text));
+            }
+        }
+    }
+
+    // Add more specific selectors for e-commerce sites
+    let content_selectors = [
+        // Product selectors
+        ".product-description",
+        ".product-details",
+        ".product-info",
+        ".product-content",
+        // Common article selectors
+        "div.detail__body-text",
+        "article",
+        "main",
+        ".content",
+        "#content",
+        // Common content containers
+        ".post-content",
+        ".entry-content",
+        ".article-content",
+        // Generic content areas
+        "div.main",
+        "div.container",
+        // Product list selectors
+        ".product-list",
+        ".products",
+        ".product-grid",
+        // Individual content elements
+        "p",
+        "div > p",
+        ".text",
+        // Headers and titles
+        "h1, h2, h3",
+        // Product titles
+        ".product-title",
+        ".product-name",
+        // Product descriptions
+        ".description",
+        ".details"
+    ];
+
+    // Try each selector
+    for selector_str in content_selectors {
         if let Ok(selector) = scraper::Selector::parse(selector_str) {
             for element in document.select(&selector) {
-                // Skip elements with common noise classes/ids
-                if should_skip_element(&element) {
-                    continue;
-                }
-
                 let text = element.text()
                     .collect::<Vec<_>>()
-                    .join(" ")
-                    .replace('\n', " ")
-                    .replace('\t', " ");
+                    .join(" ");
                 
-                // Clean up the text
                 let cleaned = clean_text(&text);
-                
-                if !cleaned.is_empty() && cleaned.split_whitespace().count() > 10 {
-                    texts.push((cleaned, priority));
+                // Reduce minimum word count requirement
+                if !cleaned.is_empty() && cleaned.split_whitespace().count() > 3 {
+                    texts.push(cleaned);
                 }
             }
         }
     }
 
-    // Sort by priority and remove duplicates
-    texts.sort_by(|a, b| b.1.cmp(&a.1));
-    let mut final_texts = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-
-    for (text, _) in texts {
-        if !seen.contains(&text) {
-            seen.insert(text.clone());
-            final_texts.push(text);
-        }
-    }
-
-    if final_texts.is_empty() {
-        // Fallback: Extract all text content if no structured content found
+    // If still no content, try getting all text content
+    if texts.is_empty() {
+        info!("No content found with specific selectors, trying generic text extraction");
         let text = document.root_element()
             .text()
             .collect::<Vec<_>>()
             .join(" ");
+        
         let cleaned = clean_text(&text);
         if !cleaned.is_empty() {
-            final_texts.push(cleaned);
+            texts.push(cleaned);
         }
     }
 
-    Ok(final_texts)
+    // Less restrictive filtering
+    texts = texts.into_iter()
+        .filter(|text| {
+            // Basic filters for obvious non-content
+            !text.contains("function") && 
+            !text.contains("window.") &&
+            !text.contains("script") &&
+            // Ensure some minimum content
+            text.split_whitespace().count() > 3 &&
+            // Less restrictive content check
+            (text.contains(" ") || // Has spaces
+             text.chars().any(|c| c.is_alphabetic())) // Has letters
+        })
+        .collect();
+
+    // Structure the content better
+    texts = texts.into_iter()
+        .filter(|_text| {
+            // Keep all texts at this point since we already filtered above
+            true
+        })
+        .map(|text| {
+            // Add section markers for better context
+            if text.contains("Product") || text.contains("Item") {
+                format!("Product Information: {}", text)
+            } else if text.contains("Price") || text.contains("Rp") {
+                format!("Pricing Information: {}", text)
+            } else if text.contains("Description") {
+                format!("Product Description: {}", text)
+            } else {
+                text
+            }
+        })
+        .collect();
+
+    info!("Found {} text sections", texts.len());
+    
+    // Print structured content for debugging
+    for (i, text) in texts.iter().take(3).enumerate() {
+        info!("Sample text {}: {:.100}...", i + 1, text);
+    }
+
+    if texts.is_empty() {
+        anyhow::bail!("Could not extract readable content from {}", url);
+    }
+
+    Ok(texts)
 }
 
 fn should_skip_element(element: &scraper::ElementRef) -> bool {
@@ -210,27 +313,31 @@ fn should_skip_element(element: &scraper::ElementRef) -> bool {
 }
 
 fn clean_text(text: &str) -> String {
-    let mut cleaned = text
+    let cleaned = text
         .split_whitespace()
         .collect::<Vec<_>>()
-        .join(" ");
+        .join(" ")
+        .replace('\n', " ")
+        .replace('\t', " ")
+        .replace("  ", " ");
     
-    // Remove multiple spaces
-    while cleaned.contains("  ") {
-        cleaned = cleaned.replace("  ", " ");
-    }
-    
-    // Remove common noise patterns
-    cleaned = cleaned
+    // Less aggressive cleaning
+    let cleaned = cleaned
         .replace("JavaScript is disabled", "")
         .replace("Please enable JavaScript", "")
-        .replace("You need to enable JavaScript to run this app", "");
-        
-    cleaned.trim().to_string()
+        .replace("You need to enable JavaScript to run this app", "")
+        // Keep some common text that might be relevant for e-commerce
+        .replace("Shopping Cart", "")
+        .replace("Add to Cart", "")
+        .trim()
+        .to_string();
+
+    // Remove multiple spaces again after all replacements
+    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 // Optimize document loading with parallel processing
-async fn load_documents(paths: &[&str]) -> Result<Vec<Vec<String>>> {
+async fn load_documents(paths: &[String]) -> Result<Vec<Vec<String>>> {
     let futures: Vec<_> = paths
         .iter()
         .map(|path| load_document(PathBuf::from(path)))
@@ -245,103 +352,86 @@ async fn load_documents(paths: &[&str]) -> Result<Vec<Vec<String>>> {
 // Optimize ChatInteraction for better performance
 struct ChatInteraction {
     state: Arc<ChatState>,
-    deepseek_client: Client,
+    mistral_client: Client,  // Keep this for chat
     max_retries: u32,
     timeout_duration: Duration,
-    last_agent_creation: PLMutex<Option<Instant>>,
 }
 
 impl ChatInteraction {
-    fn new(state: Arc<ChatState>, deepseek_client: Client) -> Self {
+    fn new(state: Arc<ChatState>, mistral_client: Client) -> Self {
         Self {
             state,
-            deepseek_client,
+            mistral_client,
             max_retries: 2,
-            timeout_duration: Duration::from_secs(45),
-            last_agent_creation: PLMutex::new(None),
-        }
-    }
-
-    // Modify the agent creation to use simple timestamp caching
-    async fn get_or_create_agent(&self) -> Result<rig::agent::Agent<DeepSeekCompletionModel>> {
-        const CACHE_DURATION: Duration = Duration::from_secs(60);
-        
-        let should_create = {
-            let last_creation = self.last_agent_creation.lock();
-            last_creation.map_or(true, |time| time.elapsed() > CACHE_DURATION)
-        };
-
-        if should_create {
-            let index = self.state.index.lock().clone();
-            let model = self.state.model.lock().clone();
-            
-            let agent = build_agent(
-                &self.deepseek_client,
-                index.as_ref(),
-                model.as_ref()
-            ).await?;
-
-            *self.last_agent_creation.lock() = Some(Instant::now());
-            Ok(agent)
-        } else {
-            // Create a fresh agent if within cache duration
-            let index = self.state.index.lock().clone();
-            let model = self.state.model.lock().clone();
-            
-            build_agent(
-                &self.deepseek_client,
-                index.as_ref(),
-                model.as_ref()
-            ).await
+            timeout_duration: Duration::from_secs(30),
         }
     }
 
     async fn process_message(&self, input: String) -> Result<()> {
-        info!("Processing message: {}", input);
+        let storage = self.state.storage.read().await;
+        let is_rig_cli = std::env::args().any(|arg| arg == "--rig-cli");
         
-        // Prepare messages with minimal locking
-        let messages = {
-            let history = self.state.chat_history.lock();
-            let mut messages = history.to_vec(); // Clone the Vec, not the guard
-            messages.push(Message {
-                role: "user".to_string(),
-                content: input.clone(),
-            });
-            messages
-        };
+        // Create embedding model for search
+        let cohere_client = cohere::Client::from_env();
+        let embedding_model = cohere_client.embedding_model(EMBED_ENGLISH_V3, "search_document");
+        
+        // Get chat history and add new message
+        let mut messages = self.state.chat_history.lock().to_vec();
+        messages.push(Message {
+            role: "user".to_string(),
+            content: input.clone(),
+        });
 
-        let response = self.get_response_with_retry(messages).await?;
+        // Build agent with proper storage reference
+        let agent = build_agent(
+            &self.mistral_client,
+            &*storage,
+            &embedding_model,
+        ).await?;
+
+        // Call chat with proper arguments
+        let response = agent.chat(&input, messages.clone()).await?;
         
-        // Update history efficiently
-        {
-            let mut history = self.state.chat_history.lock();
-            history.push(Message {
-                role: "user".to_string(),
-                content: input,
-            });
-            history.push(Message {
-                role: "assistant".to_string(),
-                content: response.clone(),
-            });
+        // Only print response and log if not using rig_cli
+        if !is_rig_cli {
+            println!("\nZoey: {}", response);
+            tracing::info!("Response:\n{}\n", response);
         }
 
-        println!("Zoey: {}", response);
+        // Update chat history with response
+        let mut history = self.state.chat_history.lock();
+        history.push(Message {
+            role: "user".to_string(),
+            content: input,
+        });
+        history.push(Message {
+            role: "assistant".to_string(),
+            content: response,
+        });
+
         Ok(())
     }
 
     async fn get_response_with_retry(&self, messages: Vec<Message>) -> Result<String> {
         let mut attempts = 0;
+        let mut last_error = None;
 
         while attempts < self.max_retries {
             attempts += 1;
-            let timeout_duration = self.timeout_duration;
-
             info!("Attempt {}/{}", attempts, self.max_retries);
             println!("🤔 Processing... (attempt {}/{})", attempts, self.max_retries);
             
-            let agent = self.get_or_create_agent().await?;
+            let storage = self.state.storage.read().await;
+            let cohere_client = cohere::Client::from_env();
+            let embedding_model = cohere_client.embedding_model(EMBED_ENGLISH_V3, "search_document");
+            
+            let agent = build_agent(
+                &self.mistral_client,
+                &*storage,  // Dereference RwLockReadGuard
+                &embedding_model,
+            ).await?;
 
-            match timeout(timeout_duration, agent.chat(
+            match timeout(self.timeout_duration, agent.chat(
                 "You are Zoey, an engaging AI research assistant",
                 messages.clone()
             )).await {
@@ -351,36 +441,154 @@ impl ChatInteraction {
                 }
                 Ok(Err(e)) => {
                     warn!("Attempt {} failed: {}", attempts, e);
-                    tokio::time::sleep(Duration::from_millis(1000)).await;
+                    last_error = Some(e);
+                    tokio::time::sleep(Duration::from_millis(500)).await;
                 }
                 Err(_) => {
                     warn!("Attempt {} timed out", attempts);
-                    tokio::time::sleep(Duration::from_millis(1000)).await;
+                    tokio::time::sleep(Duration::from_millis(500)).await;
                 }
             }
         }
 
-        error!("Failed after {} attempts", attempts);
-        Err(anyhow::anyhow!("I apologize, but I'm having trouble processing your request right now. This might be due to the complexity of the documents or network issues. Could you try asking a more specific question?"))
+        Err(anyhow::anyhow!("Failed to get response after {} attempts. Last error: {:?}", attempts, last_error))
     }
 }
 
+#[async_trait::async_trait]
+impl Chat for ChatInteraction {
+    fn chat(&self, prompt: &str, chat_history: Vec<Message>) -> impl std::future::Future<Output = Result<String, PromptError>> + Send {
+        async move {
+            // Handle /load command in CLI mode
+            if let Some(paths) = prompt.strip_prefix("/load ") {
+                let paths: Vec<String> = paths.split_whitespace()
+                    .map(|s| s.to_string())
+                    .collect();
+                
+                match load_documents(&paths).await {
+                    Ok(chunks) => {
+                        let cohere_client = cohere::Client::from_env();
+                        if let Err(e) = process_new_documents(
+                            &self.state,
+                            chunks,
+                            &paths,
+                            &cohere_client
+                        ).await {
+                            return Ok(format!("Error loading documents: {}", e));
+                        }
+                        return Ok(format!("📚 Successfully loaded {} document(s)!", paths.len()));
+                    }
+                    Err(e) => {
+                        return Ok(format!("Error loading documents: {}", e));
+                    }
+                }
+            }
+
+            // Handle regular chat messages
+            match self.process_message(prompt.to_string()).await {
+                Ok(_) => {
+                    let history = self.state.chat_history.lock();
+                    if let Some(last_msg) = history.iter().rev().find(|msg| msg.role == "assistant") {
+                        Ok(last_msg.content.clone())
+                    } else {
+                        Ok("I apologize, but I couldn't generate a response.".to_string())
+                    }
+                }
+                Err(e) => Ok(format!("Error: {}", e)),
+            }
+        }
+    }
+}
+
+// Add function to load existing documents from database
+async fn load_existing_documents(
+    conn: &Connection,
+    embedding_model: &cohere::EmbeddingModel,
+) -> Result<(SqliteVectorStore<cohere::EmbeddingModel, Document>, Vec<DocumentMetadata>)> {
+    // Create store
+    let store = SqliteVectorStore::new(conn.clone(), embedding_model).await?;
+    
+    // Load metadata from a separate table
+    let metadata = conn.call(|conn: &mut rusqlite::Connection| {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS document_metadata (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                chunk_count INTEGER NOT NULL
+            )",
+            [],
+        )?;
+        
+        let mut stmt = conn.prepare("SELECT id, source, timestamp, chunk_count FROM document_metadata")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(DocumentMetadata {
+                id: row.get(0)?,
+                source: row.get(1)?,
+                timestamp: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(2)?)
+                    .unwrap()
+                    .with_timezone(&chrono::Local),
+                chunk_count: row.get(3)?,
+            })
+        })?;
+        
+        let mut metadata = Vec::new();
+        for row in rows {
+            metadata.push(row?);
+        }
+        Ok(metadata)
+    }).await?;
+
+    Ok((store, metadata))
+}
+
+// Modify the document loading process in main
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Ensure COHERE_API_KEY is set
-    let _api_key = std::env::var("COHERE_API_KEY")
+    // Check if --rig-cli argument is provided before initializing tracing
+    let args: Vec<String> = std::env::args().collect();
+    let is_rig_cli = args.contains(&"--rig-cli".to_string());
+    
+    // Only initialize tracing if not using rig-cli
+    if !is_rig_cli {
+        tracing_subscriber::fmt::init();
+    }
+    
+    // Initialize the sqlite-vec extension
+    unsafe {
+        sqlite3_auto_extension(Some(std::mem::transmute(sqlite3_vec_init as *const ())));
+    }
+
+    // Ensure environment variables are set
+    let mistral_key = std::env::var("MISTRAL_API_KEY")
+        .context("MISTRAL_API_KEY environment variable not set")?;
+    let _cohere_key = std::env::var("COHERE_API_KEY")
         .context("COHERE_API_KEY environment variable not set")?;
 
-    // Ensure DEEPSEEK_API_KEY is set
-    let _deepseek_key = std::env::var("DEEPSEEK_API_KEY")
-        .context("DEEPSEEK_API_KEY environment variable not set")?;
+    // Initialize Cohere client
+    let cohere_client = Arc::new(cohere::Client::from_env());
+    let embedding_model = cohere_client.embedding_model(EMBED_ENGLISH_V3, "search_document");
 
-    // Initialize clients
-    let deepseek_client = Client::from_env();
-    let cohere_client = cohere::Client::from_env();
+    // Initialize SQLite connection and load existing documents
+    let conn = Connection::open("zoey.db").await?;
+    let (_store, metadata) = load_existing_documents(&conn, &embedding_model).await?;
+
+    // Initialize state
+    let state = Arc::new(ChatState::new().await?);
     
-    let state = Arc::new(ChatState::default());
-    let cohere_client = Arc::new(cohere_client);
+    // Initialize the store with embedding model
+    {
+        let mut storage = state.storage.write().await;  // Make storage mutable
+        let cohere_client = cohere::Client::from_env();
+        let embedding_model = cohere_client.embedding_model(EMBED_ENGLISH_V3, "search_document");
+        storage.initialize_store(embedding_model).await?;
+    }
+
+    // Initialize Mistral client
+    let mistral_client = mistral::Client::new(&mistral_key);
+
+    // Create chat interaction handler
+    let chat = ChatInteraction::new(state.clone(), mistral_client);
 
     println!("🤖 Welcome to Zoey - Your AI Research Assistant! 🌟");
     println!("\nCommands:");
@@ -391,114 +599,180 @@ async fn main() -> Result<()> {
     println!("  👋 /exit                     - Say goodbye and quit");
     println!("\nI can help you analyze documents , web pages and chat about anything! Let's get started! 😊\n");
 
-    let chat = ChatInteraction::new(state.clone(), deepseek_client);
-
-    loop {
-        let input = read_user_input().await?;
-        
-        if input.trim() == "/exit" {
-            break;
-        }
-        
-        if input.trim() == "/history" {
-            let history = state.chat_history.lock();
-            println!("\n📜 Conversation History:");
-            for msg in history.iter() {  // Use iter() to iterate over Vec
-                match msg.role.as_str() {
-                    "user" => println!("You: {}", msg.content),
-                    "assistant" => println!("Zoey: {}", msg.content),
-                    _ => {}  // Skip system messages
-                }
+    // Check if --rig-cli argument is provided
+    if args.contains(&"--rig-cli".to_string()) {
+        // Use rig::cli_chatbot
+        rig::cli_chatbot::cli_chatbot(chat).await?;
+    } else {
+        // Use original CLI implementation
+        loop {
+            let input = read_user_input().await?;
+            
+            if input.trim() == "/exit" {
+                break;
             }
-            continue;
-        }
-        
-        if input.trim() == "/clear_history" {
-            let mut history = state.chat_history.lock();
-            history.clear();
-            history.push(Message {
-                role: "system".to_string(),
-                content: "You are Zoey, an engaging and knowledgeable AI assistant".to_string()
-            });
-            println!("🧹 Chat history cleared!");
-            continue;
-        }
-        
-        if let Some(paths) = input.strip_prefix("/load ") {
-            let paths: Vec<&str> = paths.split_whitespace().collect();
             
-            // Load new documents
-            let chunks = load_documents(&paths).await?;
-            {
-                let mut chunks_guard = state.chunks.lock();
-                chunks_guard.extend(chunks.into_iter().flatten());
-            
-                // Rebuild embeddings with all documents
-                let model = cohere_client.embedding_model(EMBED_ENGLISH_V3, "search_document");
-                let mut builder = EmbeddingsBuilder::new(model.clone());
-                
-                for (i, chunk) in chunks_guard.iter().enumerate() {
-                    builder = builder.document(Document {
-                        id: format!("doc_{}", i),
-                        content: chunk.clone(),
-                    })?;
+            if input.trim() == "/history" {
+                let history = state.chat_history.lock();
+                println!("\n📜 Conversation History:");
+                for msg in history.iter() {  // Use iter() to iterate over Vec
+                    match msg.role.as_str() {
+                        "user" => println!("You: {}", msg.content),
+                        "assistant" => println!("Zoey: {}", msg.content),
+                        _ => {}  // Skip system messages
+                    }
                 }
+                continue;
+            }
+            
+            if input.trim() == "/clear_history" {
+                let mut history = state.chat_history.lock();
+                history.clear();
+                history.push(Message {
+                    role: "system".to_string(),
+                    content: "You are Zoey, an engaging and knowledgeable AI assistant".to_string()
+                });
+                println!("🧹 Chat history cleared!");
+                continue;
+            }
+            
+            if let Some(paths) = input.strip_prefix("/load ") {
+                let paths: Vec<String> = paths.split_whitespace()
+                    .map(|s| s.to_string())
+                    .collect();
                 
-                let embeddings = builder.build().await?;
-                let vector_store = InMemoryVectorStore::from_documents(embeddings);
+                // Load new documents
+                let chunks = load_documents(&paths).await?;
                 
-                // Update index and model
-                *state.index.lock() = Some(Arc::new(vector_store));
-                *state.model.lock() = Some(model);
+                // Process and store new documents
+                process_new_documents(
+                    &state,
+                    chunks,
+                    &paths,
+                    &cohere_client
+                ).await?;
                 
+                let doc_count = metadata.len();
                 println!("📚 Successfully loaded {} new document(s)! Total documents: {}", 
-                    paths.len(), chunks_guard.len());
+                    paths.len(), doc_count);
                 println!("💡 You can now ask me about any of the loaded documents or compare them!");
+                continue;
             }
-            continue;
-        }
 
-        if input.trim() == "/clear" {
-            *state.index.lock() = None;
-            state.chunks.lock().clear();
-            *state.model.lock() = None;
-            println!("🧹 Memory cleared! I'm ready for new conversations or documents.");
-            continue;
-        }
+            if input.trim() == "/clear" {
+                let storage = state.storage.write().await;
+                storage.clear_documents().await?;
+                println!("🧹 Memory cleared! I'm ready for new conversations or documents.");
+                continue;
+            }
 
-        if let Err(e) = chat.process_message(input).await {
-            println!("❌ Error: {}. Please try again.", e);
+            if let Err(e) = chat.process_message(input).await {
+                println!("❌ Error: {}. Please try again.", e);
+            }
         }
     }
 
     Ok(())
 }
 
+// Modify the document loading process
+async fn process_new_documents(
+    state: &Arc<ChatState>,
+    chunks: Vec<Vec<String>>,
+    sources: &[String],
+    cohere_client: &cohere::Client,
+) -> Result<()> {
+    info!("Processing new documents from {} sources", sources.len());
+    let model = cohere_client.embedding_model(cohere::EMBED_ENGLISH_V3, "search_document");
+    let mut builder = EmbeddingsBuilder::new(model.clone());
+    
+    let storage = state.storage.read().await;
+    
+    // Create documents
+    let mut documents = Vec::new();
+    for (source, chunk) in sources.iter().zip(chunks.iter()) {
+        info!("Processing chunks from source: {}", source);
+        for (i, content) in chunk.iter().enumerate() {
+            info!("Processing chunk {}/{}", i + 1, chunk.len());
+            let doc = storage.add_document(source, content).await?;
+            builder = builder.document(doc.clone())?;
+            documents.push(doc);
+        }
+    }
+    
+    info!("Building embeddings for {} documents", documents.len());
+    let embeddings = builder.build().await?;
+    
+    // Add to vector store
+    if let Some(store) = storage.get_store() {
+        info!("Adding documents to vector store");
+        store.add_rows(embeddings).await?;
+        info!("Successfully added documents to vector store");
+    } else {
+        warn!("No vector store available to add documents");
+    }
+
+    Ok(())
+}
 async fn build_agent(
     client: &Client,
-    index: Option<&Arc<InMemoryVectorStore<Document>>>,
-    model: Option<&cohere::EmbeddingModel>,
-) -> Result<rig::agent::Agent<DeepSeekCompletionModel>> {
-    let mut builder = client.agent(deepseek::DEEPSEEK_CHAT);
+    storage: &StorageManager,
+    model: &cohere::EmbeddingModel,
+) -> Result<rig::agent::Agent<MistralCompletionModel>> {
+    let mut builder = client.agent(mistral::MISTRAL_LARGE);
     
     builder = builder
-        .max_tokens(2000)  // Reduced for faster responses
+        .max_tokens(4000)
         .temperature(0.7);
     
-    if let (Some(index), Some(model)) = (index, model) {
-        builder = builder
-            .preamble(
-                "You are Zoey, an enthusiastic and knowledgeable AI research assistant with a friendly personality. \
-                When users ask about loaded documents, provide insightful analysis and clear explanations, \
-                drawing connections between different parts when relevant. \
-                For other topics, be conversational and engaging, showing curiosity and warmth. \
-                Use emojis occasionally to add personality, but don't overdo it. \
-                If users seem confused or frustrated, be extra helpful and patient. \
-                When discussing complex topics, break them down into simpler terms. \
-                Always maintain a positive and encouraging tone while being direct and clear."
-            )
-            .dynamic_context(4, (*index.clone()).clone().index(model.clone()));
+    // First check if store exists and has documents
+    if let Some(store) = storage.get_store() {
+        // Only add dynamic context if store has documents
+        let index = store.clone().index(model.clone());
+        
+        // Get all documents to check if any exist
+        info!("Checking for documents in store...");
+        let has_documents = match storage.get_documents().await {
+            Ok(docs) => {
+                info!("Found {} documents in store", docs.len());
+                !docs.is_empty()
+            },
+            Err(e) => {
+                warn!("Error checking documents: {}", e);
+                false
+            }
+        };
+
+        if has_documents {
+            info!("Initializing agent with document context");
+            builder = builder
+                .preamble(
+                    "You are Zoey, an enthusiastic and knowledgeable AI research assistant with a friendly personality. \
+                    When users ask about loaded documents, provide insightful analysis and clear explanations, \
+                    drawing connections between different parts when relevant. \
+                    Always reference specific information from the documents to support your answers. \
+                    If the documents don't contain enough information to answer a question fully, \
+                    be honest about what you can and cannot find in the documents. \
+                    Use emojis occasionally to add personality, but don't overdo it. \
+                    When discussing complex topics, break them down into simpler terms. \
+                    For website content, focus on the most recently loaded information first."
+                )
+                .dynamic_context(8, index);
+        } else {
+            warn!("No documents found in store");
+            // No documents in store - use basic chat mode
+            builder = builder
+                .preamble(
+                    "You are Zoey, a friendly and engaging AI assistant with a warm personality. \
+                    You love learning from users and having meaningful conversations on any topic. \
+                    Use a natural, conversational tone and show genuine interest in users' questions. \
+                    Feel free to use occasional emojis to express yourself, but keep it professional. \
+                    If users need help with documents, kindly let them know they can use /load to share them with you."
+                );
+        }
     } else {
+        warn!("No store initialized");
+        // No store initialized - use basic chat mode
         builder = builder
             .preamble(
                 "You are Zoey, a friendly and engaging AI assistant with a warm personality. \
@@ -518,3 +792,4 @@ async fn read_user_input() -> Result<String> {
     stdin.next_line().await?
         .ok_or_else(|| anyhow::anyhow!("Failed to read input"))
 }
+

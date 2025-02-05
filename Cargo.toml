@@ -6,3 +6,6 @@ members = [
 ]
 resolver = "2"
 
+[workspace.dependencies]
+rig-core = { path = "./rig-core", features = ["pdf", "derive"] }
+rig-sqlite = { path = "./rig-sqlite" }
