@@ -2,7 +2,7 @@ use anyhow::Result;
 use crypto_agents::agents::{NewTopAgent, ModelProvider};
 use dotenv::dotenv;
 use tokio::time::{sleep, Duration};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 
 const UPDATE_INTERVAL: u64 = 30 * 60; // 30 minutes in seconds
 

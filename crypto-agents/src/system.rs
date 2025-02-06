@@ -9,28 +9,28 @@ use std::env;
 use std::io::Write;
 
 use crate::{
-    agents::{TechnicalAgent, FundamentalAgent, TokenExtractor, SynopsisAgent, ModelProvider, Agent},
+    agents::{TechnicalAgent, FundamentalAgent, TokenExtractor, SynopsisAgent, Agent, SentimentAgent, TopicAgent},
     api::coingecko::CoinGeckoClient,
+    agents::ModelProvider,
 };
 
 const MAX_HISTORY_ROUNDS: usize = 50;
 const MINUTES_BETWEEN_ROUNDS: u64 = 30;
 
-// Default model constants
-const DEFAULT_DEEPSEEK_MODEL: &str = "deepseek-chat";
-const DEFAULT_GEMINI_MODEL: &str = "gemini-pro";
-const DEFAULT_MISTRAL_MODEL: &str = "mistral-large-latest";
-
-impl ModelProvider {
-    fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "deepseek" => Some(Self::DeepSeek),
-            "gemini" => Some(Self::Gemini),
-            "mistral" => Some(Self::Mistral),
-            _ => None
-        }
-    }
-}
+// Define model constants that will be used
+const DEFAULT_MODELS: &[(&str, &str)] = &[
+    ("deepseek", "deepseek-reasoner"),
+    ("deepseek", "deepseek-chat"),
+    ("gemini", "gemini-2.0-flash-exp"),
+    ("mistral", "mistral-large-latest"),
+    ("mistral", "mistral-small-latest"),
+    ("openai", "gpt-4o-mini"),
+    ("cohere", "command-nightly"),
+    ("cohere", "command-r-plus-08-2024"),
+    ("openrouter", "anthropic/claude-2"),
+    ("openrouter", "google/gemini-2.0-flash-001"),
+    ("openrouter", "mistralai/mistral-nemo"),
+];
 
 pub struct MultiAgentSystem {
     api: CoinGeckoClient,
@@ -38,6 +38,8 @@ pub struct MultiAgentSystem {
     fundamental_agent: FundamentalAgent,
     token_extractor: TokenExtractor,
     synopsis_agent: SynopsisAgent,
+    sentiment_agent: SentimentAgent,
+    topic_agent: TopicAgent,
     round_history: VecDeque<String>,
 }
 
@@ -49,62 +51,141 @@ impl MultiAgentSystem {
         // Initialize API client
         let api = CoinGeckoClient::new()?;
         
-        // Get model configurations from environment variables
-        let technical_model = env::var("TECHNICAL_MODEL").unwrap_or_else(|_| DEFAULT_DEEPSEEK_MODEL.to_string());
+        // Get model configurations with new providers
         let technical_provider = env::var("TECHNICAL_PROVIDER")
             .ok()
             .and_then(|p| ModelProvider::from_str(&p))
-            .unwrap_or(ModelProvider::DeepSeek);
+            .unwrap_or(ModelProvider::OpenAI);
 
-        let fundamental_model = env::var("FUNDAMENTAL_MODEL").unwrap_or_else(|_| DEFAULT_DEEPSEEK_MODEL.to_string());
+        let technical_model = env::var("TECHNICAL_MODEL")
+            .unwrap_or_else(|_| {
+                DEFAULT_MODELS.iter()
+                    .find(|(provider, _)| *provider == technical_provider.to_string().to_lowercase())
+                    .map(|(_, model)| *model)
+                    .unwrap_or("gpt-4o-mini")
+                    .to_string()
+            });
+
         let fundamental_provider = env::var("FUNDAMENTAL_PROVIDER")
             .ok()
             .and_then(|p| ModelProvider::from_str(&p))
-            .unwrap_or(ModelProvider::DeepSeek);
+            .unwrap_or(ModelProvider::OpenAI);
 
-        let extractor_model = env::var("EXTRACTOR_MODEL").unwrap_or_else(|_| DEFAULT_MISTRAL_MODEL.to_string());
+        let fundamental_model = env::var("FUNDAMENTAL_MODEL")
+            .unwrap_or_else(|_| {
+                DEFAULT_MODELS.iter()
+                    .find(|(provider, _)| *provider == fundamental_provider.to_string().to_lowercase())
+                    .map(|(_, model)| *model)
+                    .unwrap_or("gpt-4o-mini")
+                    .to_string()
+            });
+
+        let sentiment_provider = env::var("SENTIMENT_PROVIDER")
+            .ok()
+            .and_then(|p| ModelProvider::from_str(&p))
+            .unwrap_or(ModelProvider::Cohere);
+
+        let sentiment_model = env::var("SENTIMENT_MODEL")
+            .unwrap_or_else(|_| {
+                DEFAULT_MODELS.iter()
+                    .find(|(provider, _)| *provider == sentiment_provider.to_string().to_lowercase())
+                    .map(|(_, model)| *model)
+                    .unwrap_or("command-nightly")
+                    .to_string()
+            });
+
+        let synopsis_provider = env::var("SYNOPSIS_PROVIDER")
+            .ok()
+            .and_then(|p| ModelProvider::from_str(&p))
+            .unwrap_or(ModelProvider::Gemini);
+
+        let synopsis_model = env::var("SYNOPSIS_MODEL")
+            .unwrap_or_else(|_| {
+                DEFAULT_MODELS.iter()
+                    .find(|(provider, _)| *provider == synopsis_provider.to_string().to_lowercase())
+                    .map(|(_, model)| *model)
+                    .unwrap_or("gemini-2.0-flash-exp")
+                    .to_string()
+            });
+
         let extractor_provider = env::var("EXTRACTOR_PROVIDER")
             .ok()
             .and_then(|p| ModelProvider::from_str(&p))
             .unwrap_or(ModelProvider::Mistral);
 
-        let synopsis_model = env::var("SYNOPSIS_MODEL").unwrap_or_else(|_| DEFAULT_MISTRAL_MODEL.to_string());
-        let synopsis_provider = env::var("SYNOPSIS_PROVIDER")
+        let extractor_model = env::var("EXTRACTOR_MODEL")
+            .unwrap_or_else(|_| {
+                DEFAULT_MODELS.iter()
+                    .find(|(provider, _)| *provider == extractor_provider.to_string().to_lowercase())
+                    .map(|(_, model)| *model)
+                    .unwrap_or("mistral-large-latest")
+                    .to_string()
+            });
+
+        let topic_provider = env::var("TOPIC_PROVIDER")
             .ok()
             .and_then(|p| ModelProvider::from_str(&p))
-            .unwrap_or(ModelProvider::Mistral);
-        
+            .unwrap_or(ModelProvider::Gemini);
+
+        let topic_model = env::var("TOPIC_MODEL")
+            .unwrap_or_else(|_| {
+                DEFAULT_MODELS.iter()
+                    .find(|(provider, _)| *provider == topic_provider.to_string().to_lowercase())
+                    .map(|(_, model)| *model)
+                    .unwrap_or("gemini-2.0-flash-exp")
+                    .to_string()
+            });
+
         // Initialize agents with configured models
-        println!("🔄 Initializing Technical Analysis agent with {} ({})", technical_model, format!("{:?}", technical_provider));
+        println!("🔄 Initializing agents with selected providers:");
+        
+        println!("📊 Technical Analysis: {} ({})", 
+            technical_model, format!("{:?}", technical_provider));
         let technical_agent = TechnicalAgent::new(
             technical_model,
             technical_provider
         ).await?;
         
-        println!("🔄 Initializing Fundamental Analysis agent with {} ({})", fundamental_model, format!("{:?}", fundamental_provider));
+        println!("🌍 Fundamental Analysis: {} ({})", 
+            fundamental_model, format!("{:?}", fundamental_provider));
         let fundamental_agent = FundamentalAgent::new(
             fundamental_model,
             fundamental_provider
         ).await?;
-        
-        println!("🔄 Initializing Token Extractor agent with {} ({})", extractor_model, format!("{:?}", extractor_provider));
-        let token_extractor = TokenExtractor::new(
-            extractor_model,
-            extractor_provider
+
+        println!("🎭 Sentiment Analysis: {} ({})", 
+            sentiment_model, format!("{:?}", sentiment_provider));
+        let sentiment_agent = SentimentAgent::new(
+            sentiment_model,
+            sentiment_provider
         ).await?;
         
-        println!("🔄 Initializing Synopsis agent with {} ({})", synopsis_model, format!("{:?}", synopsis_provider));
+        println!("📝 Synopsis Generation: {} ({})", 
+            synopsis_model, format!("{:?}", synopsis_provider));
         let synopsis_agent = SynopsisAgent::new(
             synopsis_model,
             synopsis_provider
         ).await?;
         
+        println!("🔍 Token Extraction: {} ({})", 
+            extractor_model, format!("{:?}", extractor_provider));
+        let token_extractor = TokenExtractor::new(
+            extractor_model,
+            extractor_provider
+        ).await?;
+
+        println!("🔄 Topic Analysis: {} ({})", topic_provider.to_string(), topic_model);
+        let topic_agent = TopicAgent::new(topic_model, topic_provider).await?;
+
+        // Create system instance
         Ok(Self {
             api,
             technical_agent,
             fundamental_agent,
             token_extractor,
             synopsis_agent,
+            sentiment_agent,
+            topic_agent,
             round_history: VecDeque::with_capacity(MAX_HISTORY_ROUNDS),
         })
     }
@@ -214,6 +295,13 @@ impl MultiAgentSystem {
             .await?;
         println!("{}", fundamental_response);
         
+        // Add sentiment analysis phase
+        println!("\n🎭 Sentiment Analysis Phase...");
+        let sentiment_response = self.sentiment_agent
+            .think(&market_data, Some(technical_response.clone()))
+            .await?;
+        println!("{}", sentiment_response);
+        
         // Extract tokens
         println!("\n🔍 Extracting Token Mentions...");
         let round = self.round_history.len() as i32;
@@ -228,7 +316,11 @@ impl MultiAgentSystem {
         // Generate synopsis
         println!("\n📝 Generating Round Synopsis...");
         let synopsis = self.synopsis_agent
-            .generate_synopsis(&technical_response, &fundamental_response)
+            .generate_synopsis(
+                &technical_response,
+                &fundamental_response,
+                Some(&sentiment_response)
+            )
             .await?;
         println!("{}", synopsis);
         

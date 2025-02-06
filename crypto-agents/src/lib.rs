@@ -11,6 +11,8 @@ pub use agents::{
     TokenExtractor,
     NewTopAgent,
     ModelProvider,
+    SentimentAgent,
+    SynopsisAgent,
 };
 pub use api::coingecko::CoinGeckoClient;
 pub use models::{MarketData, GlobalData, CoinData, TrendingCoin};

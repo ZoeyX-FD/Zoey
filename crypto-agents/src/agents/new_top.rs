@@ -7,11 +7,11 @@ use std::fs::{self, OpenOptions};
 use csv::Writer;
 use tokio;
 
-use crate::models::{MarketData, Conversation, AgentError};
+use crate::models::MarketData;
 use crate::api::CoinGeckoClient;
 use super::{Agent, BaseAgent, ModelProvider};
 
-const COINGECKO_BASE_URL: &str = "https://api.coingecko.com/api/v3";  // Changed to free tier URL
+// const COINGECKO_BASE_URL: &str = "https://api.coingecko.com/api/v3";  // Changed to free tier URL
 
 const NEW_TOP_SYSTEM_PROMPT: &str = r#"
 You are the New & Top Coins Analysis Agent 🔍

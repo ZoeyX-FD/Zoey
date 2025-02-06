@@ -1,4 +1,5 @@
 pub mod mistral;
+pub mod openrouter;
 pub mod granite;
 
 pub use self::mistral::{

@@ -9,6 +9,10 @@ pub use error::AgentError;
 pub use document_loader::DocumentLoader;  // Re-export DocumentLoader
 pub use providers::*;
 
+// Re-export providers for easier access
+pub use providers::mistral;
+pub use providers::openrouter;
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use rig::embeddings::{TextEmbedder, EmbedError};

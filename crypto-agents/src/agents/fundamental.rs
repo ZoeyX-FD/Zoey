@@ -1,10 +1,9 @@
 use async_trait::async_trait;
 use anyhow::Result;
 use chrono::Utc;
-use serde_json::json;
 use std::path::PathBuf;
 
-use crate::models::{MarketData, Conversation, AgentError};
+use crate::models::{MarketData, Conversation};
 use super::{Agent, BaseAgent, ModelProvider};
 
 const FUNDAMENTAL_SYSTEM_PROMPT: &str = r#"

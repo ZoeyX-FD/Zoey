@@ -17,3 +17,6 @@ dotenv = "0.15"
 thiserror = "1.0"
 
 rig-core = { workspace = true }
+
+twitter-v2 = "0.1.8"
+agent-twitter-client = { path = "../agent-twitter-client" }

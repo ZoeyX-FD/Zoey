@@ -2,7 +2,6 @@ use crate::models::{MarketData, GlobalData, CoinData, TrendingCoin, AgentError};
 use anyhow::{Result, Context};
 use reqwest::Client;
 use serde_json::Value;
-use std::env;
 use tokio::time::Duration;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter};
@@ -383,20 +382,22 @@ impl CoinGeckoClient {
     }
     
     pub async fn get_detailed_coin_data(&self, coin_id: &str) -> Result<DetailedCoinData> {
-        let url = format!("{}/coins/{}", BASE_URL, coin_id);
+        let url = format!("{}/coins/markets", BASE_URL);
         let params = [
-            ("localization", "false"),
-            ("tickers", "false"),
-            ("market_data", "true"),
-            ("community_data", "false"),
-            ("developer_data", "false"),
-            ("sparkline", "false")
+            ("vs_currency", "usd"),
+            ("ids", coin_id),
+            ("order", "market_cap_desc"),
+            ("per_page", "1"),
+            ("page", "1"),
+            ("sparkline", "false"),
+            ("price_change_percentage", "1h,24h,7d,30d")
         ];
         
         println!("🔍 Fetching details for coin {}...", coin_id);
         let data = self.make_request(&url, &params).await?;
-        let coin_data: DetailedCoinData = serde_json::from_value(data)
-            .context("Failed to parse coin details response")?;
+        let coins: Vec<DetailedCoinData> = serde_json::from_value(data)?;
+        let coin_data = coins.into_iter().next()
+            .ok_or_else(|| anyhow::anyhow!("No data found"))?;
             
         println!("✅ Successfully fetched details for {}", coin_id);
         Ok(coin_data)

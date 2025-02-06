@@ -1,0 +1,735 @@
+use anyhow::{Context, Result};
+use rig::{
+    embeddings::EmbeddingsBuilder,
+    providers::{
+        cohere::{self, EMBED_ENGLISH_V3}
+    },
+    completion::{Message, Chat},
+    vector_store::VectorStoreIndex,
+};
+
+use common::{
+    document_loader::DocumentLoader,
+    storage::StorageManager,
+    mistral::{self, Client, MistralCompletionModel}
+};
+
+use rig_sqlite::SqliteVectorStore;
+use rusqlite::ffi::sqlite3_auto_extension;
+use sqlite_vec::sqlite3_vec_init;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::io::{self, AsyncBufReadExt, BufReader};
+use tokio::sync::RwLock;
+use std::io::Write;
+use reqwest;
+use scraper;
+use tokio::time::timeout;
+use std::time::Duration;
+use tracing::{info, warn};
+use futures::future::join_all;
+use parking_lot::Mutex as PLMutex;
+use tokio_rusqlite::Connection;
+
+// Import from our common crate
+use common::Document;
+
+// Add chrono to the imports at the top
+use chrono;
+
+// Add this struct to track document metadata
+#[derive(Debug, Clone)]
+struct DocumentMetadata {
+    id: String,
+    source: String,
+    timestamp: chrono::DateTime<chrono::Local>,
+    chunk_count: usize,
+}
+
+// Modify ChatState to handle async initialization
+struct ChatState {
+    storage: Arc<RwLock<StorageManager>>,
+    chat_history: PLMutex<Vec<Message>>,
+}
+
+impl ChatState {
+    async fn new() -> Result<Self> {
+        let storage = StorageManager::new("zoey.db").await?;
+        
+        // Create tables with proper schema
+        storage.initialize_tables().await?;
+        
+        Ok(Self {
+            storage: Arc::new(RwLock::new(storage)),
+            chat_history: PLMutex::new(vec![Message {
+                role: "system".to_string(),
+                content: "You are Zoey, an engaging and knowledgeable AI assistant".to_string()
+            }]),
+        })
+    }
+}
+
+const DEFAULT_CHUNK_SIZE: usize = 2000;
+
+async fn load_document(path: PathBuf) -> Result<Vec<String>> {
+    // Add better error context
+    let result = if path.to_string_lossy().starts_with("http") {
+        load_url(&path.to_string_lossy())
+            .await
+            .with_context(|| format!("Failed to load URL: {}", path.display()))
+    } else {
+        let documents_dir = std::env::current_dir()
+            .with_context(|| "Failed to get current directory")?
+            .join("documents");
+        let full_path = documents_dir.join(path.clone());
+        
+        DocumentLoader::load(full_path)
+            .with_context(|| format!("Failed to load document from path: {}", path.display()))
+    };
+
+    // Process content into chunks
+    let content = result?;
+    let chunks = chunk_content(&content, DEFAULT_CHUNK_SIZE)?;
+    
+    // Validate chunks
+    if chunks.is_empty() {
+        anyhow::bail!("No content found in document: {}", path.display());
+    }
+    
+    Ok(chunks)
+}
+
+fn chunk_content(content: &[String], chunk_size: usize) -> Result<Vec<String>> {
+    let mut chunks = Vec::new();
+    let mut current_chunk = String::new();
+    
+    for text in content {
+        for word in text.split_whitespace() {
+            if current_chunk.len() + word.len() + 1 > chunk_size {
+                if !current_chunk.is_empty() {
+                    chunks.push(current_chunk.trim().to_string());
+                    current_chunk.clear();
+                }
+            }
+            current_chunk.push_str(word);
+            current_chunk.push(' ');
+        }
+    }
+    
+    if !current_chunk.is_empty() {
+        chunks.push(current_chunk.trim().to_string());
+    }
+
+    Ok(chunks)
+}
+
+async fn load_url(url: &str) -> Result<Vec<String>> {
+    // Create a client with better headers to mimic a real browser
+    let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+        .default_headers({
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8".parse().unwrap());
+            headers.insert("Accept-Language", "en-US,en;q=0.5".parse().unwrap());
+            headers.insert("Connection", "keep-alive".parse().unwrap());
+            headers
+        })
+        .build()?;
+
+    // Fetch HTML content with better error handling
+    let response = client.get(url)
+        .send()
+        .await
+        .with_context(|| format!("Failed to fetch URL: {}", url))?;
+
+    info!("Response status: {}", response.status());
+
+    // Get the response text
+    let html = response.text().await?;
+    
+    info!("Retrieved HTML length: {} bytes", html.len());
+    
+    let document = scraper::Html::parse_document(&html);
+
+    let mut texts = Vec::new();
+    
+    // Add URL and timestamp as context
+    texts.push(format!("Source URL: {} (Loaded at: {})", 
+        url, 
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+    ));
+
+    // Extract title first
+    if let Ok(title_selector) = scraper::Selector::parse("title") {
+        if let Some(title) = document.select(&title_selector).next() {
+            let title_text = clean_text(&title.text().collect::<String>());
+            if !title_text.is_empty() {
+                texts.push(format!("Page Title: {}", title_text));
+            }
+        }
+    }
+
+    // Add more specific selectors for e-commerce sites
+    let content_selectors = [
+        // Product selectors
+        ".product-description",
+        ".product-details",
+        ".product-info",
+        ".product-content",
+        // Common article selectors
+        "div.detail__body-text",
+        "article",
+        "main",
+        ".content",
+        "#content",
+        // Common content containers
+        ".post-content",
+        ".entry-content",
+        ".article-content",
+        // Generic content areas
+        "div.main",
+        "div.container",
+        // Product list selectors
+        ".product-list",
+        ".products",
+        ".product-grid",
+        // Individual content elements
+        "p",
+        "div > p",
+        ".text",
+        // Headers and titles
+        "h1, h2, h3",
+        // Product titles
+        ".product-title",
+        ".product-name",
+        // Product descriptions
+        ".description",
+        ".details"
+    ];
+
+    // Try each selector
+    for selector_str in content_selectors {
+        if let Ok(selector) = scraper::Selector::parse(selector_str) {
+            for element in document.select(&selector) {
+                let text = element.text()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                
+                let cleaned = clean_text(&text);
+                // Reduce minimum word count requirement
+                if !cleaned.is_empty() && cleaned.split_whitespace().count() > 3 {
+                    texts.push(cleaned);
+                }
+            }
+        }
+    }
+
+    // If still no content, try getting all text content
+    if texts.is_empty() {
+        info!("No content found with specific selectors, trying generic text extraction");
+        let text = document.root_element()
+            .text()
+            .collect::<Vec<_>>()
+            .join(" ");
+        
+        let cleaned = clean_text(&text);
+        if !cleaned.is_empty() {
+            texts.push(cleaned);
+        }
+    }
+
+    // Less restrictive filtering
+    texts = texts.into_iter()
+        .filter(|text| {
+            // Basic filters for obvious non-content
+            !text.contains("function") && 
+            !text.contains("window.") &&
+            !text.contains("script") &&
+            // Ensure some minimum content
+            text.split_whitespace().count() > 3 &&
+            // Less restrictive content check
+            (text.contains(" ") || // Has spaces
+             text.chars().any(|c| c.is_alphabetic())) // Has letters
+        })
+        .collect();
+
+    // Structure the content better
+    texts = texts.into_iter()
+        .filter(|_text| {
+            // Keep all texts at this point since we already filtered above
+            true
+        })
+        .map(|text| {
+            // Add section markers for better context
+            if text.contains("Product") || text.contains("Item") {
+                format!("Product Information: {}", text)
+            } else if text.contains("Price") || text.contains("Rp") {
+                format!("Pricing Information: {}", text)
+            } else if text.contains("Description") {
+                format!("Product Description: {}", text)
+            } else {
+                text
+            }
+        })
+        .collect();
+
+    info!("Found {} text sections", texts.len());
+    
+    // Print structured content for debugging
+    for (i, text) in texts.iter().take(3).enumerate() {
+        info!("Sample text {}: {:.100}...", i + 1, text);
+    }
+
+    if texts.is_empty() {
+        anyhow::bail!("Could not extract readable content from {}", url);
+    }
+
+    Ok(texts)
+}
+
+fn should_skip_element(element: &scraper::ElementRef) -> bool {
+    let skip_classes = [
+        "nav", "navigation", "menu", "footer", "header", "sidebar",
+        "comment", "advertisement", "ad", "cookie", "popup"
+    ];
+    
+    let skip_ids = [
+        "nav", "navigation", "menu", "footer", "header", "sidebar",
+        "comments", "advertisement"
+    ];
+
+    if let Some(class) = element.value().attr("class") {
+        if skip_classes.iter().any(|skip| class.contains(skip)) {
+            return true;
+        }
+    }
+
+    if let Some(id) = element.value().attr("id") {
+        if skip_ids.iter().any(|skip| id.contains(skip)) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn clean_text(text: &str) -> String {
+    let cleaned = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('\n', " ")
+        .replace('\t', " ")
+        .replace("  ", " ");
+    
+    // Less aggressive cleaning
+    let cleaned = cleaned
+        .replace("JavaScript is disabled", "")
+        .replace("Please enable JavaScript", "")
+        .replace("You need to enable JavaScript to run this app", "")
+        // Keep some common text that might be relevant for e-commerce
+        .replace("Shopping Cart", "")
+        .replace("Add to Cart", "")
+        .trim()
+        .to_string();
+
+    // Remove multiple spaces again after all replacements
+    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+// Optimize document loading with parallel processing
+async fn load_documents(paths: &[String]) -> Result<Vec<Vec<String>>> {
+    let futures: Vec<_> = paths
+        .iter()
+        .map(|path| load_document(PathBuf::from(path)))
+        .collect();
+    
+    join_all(futures)
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>>>()
+}
+
+// Optimize ChatInteraction for better performance
+struct ChatInteraction {
+    state: Arc<ChatState>,
+    mistral_client: Client,  // Keep this for chat
+    max_retries: u32,
+    timeout_duration: Duration,
+}
+
+impl ChatInteraction {
+    fn new(state: Arc<ChatState>, mistral_client: Client) -> Self {
+        Self {
+            state,
+            mistral_client,
+            max_retries: 2,
+            timeout_duration: Duration::from_secs(30),
+        }
+    }
+
+    async fn process_message(&self, input: String) -> Result<()> {
+        info!("Processing message: {}", input);
+
+        let storage = self.state.storage.read().await;
+        
+        // Create embedding model for search
+        let cohere_client = cohere::Client::from_env();
+        let embedding_model = cohere_client.embedding_model(EMBED_ENGLISH_V3, "search_document");
+        
+        // Get chat history and add new message
+        let mut messages = self.state.chat_history.lock().to_vec();
+        messages.push(Message {
+            role: "user".to_string(),
+            content: input.clone(),
+        });
+
+        // Build agent with proper storage reference
+        let agent = build_agent(
+            &self.mistral_client,
+            &*storage,
+            &embedding_model,
+        ).await?;
+
+        // Call chat with proper arguments
+        let response = agent.chat(&input, messages.clone()).await?;
+        println!("\nZoey: {}", response);
+
+        // Update chat history with response
+        let mut history = self.state.chat_history.lock();
+        history.push(Message {
+            role: "user".to_string(),
+            content: input,
+        });
+        history.push(Message {
+            role: "assistant".to_string(),
+            content: response,
+        });
+
+        Ok(())
+    }
+
+    async fn get_response_with_retry(&self, messages: Vec<Message>) -> Result<String> {
+        let mut attempts = 0;
+        let mut last_error = None;
+
+        while attempts < self.max_retries {
+            attempts += 1;
+            info!("Attempt {}/{}", attempts, self.max_retries);
+            println!("🤔 Processing... (attempt {}/{})", attempts, self.max_retries);
+            
+            let storage = self.state.storage.read().await;
+            let cohere_client = cohere::Client::from_env();
+            let embedding_model = cohere_client.embedding_model(EMBED_ENGLISH_V3, "search_document");
+            
+            let agent = build_agent(
+                &self.mistral_client,
+                &*storage,  // Dereference RwLockReadGuard
+                &embedding_model,
+            ).await?;
+
+            match timeout(self.timeout_duration, agent.chat(
+                "You are Zoey, an engaging AI research assistant",
+                messages.clone()
+            )).await {
+                Ok(Ok(response)) => {
+                    info!("Successfully got response");
+                    return Ok(response);
+                }
+                Ok(Err(e)) => {
+                    warn!("Attempt {} failed: {}", attempts, e);
+                    last_error = Some(e);
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                Err(_) => {
+                    warn!("Attempt {} timed out", attempts);
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!("Failed to get response after {} attempts. Last error: {:?}", attempts, last_error))
+    }
+}
+
+// Add function to load existing documents from database
+async fn load_existing_documents(
+    conn: &Connection,
+    embedding_model: &cohere::EmbeddingModel,
+) -> Result<(SqliteVectorStore<cohere::EmbeddingModel, Document>, Vec<DocumentMetadata>)> {
+    // Create store
+    let store = SqliteVectorStore::new(conn.clone(), embedding_model).await?;
+    
+    // Load metadata from a separate table
+    let metadata = conn.call(|conn: &mut rusqlite::Connection| {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS document_metadata (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                chunk_count INTEGER NOT NULL
+            )",
+            [],
+        )?;
+        
+        let mut stmt = conn.prepare("SELECT id, source, timestamp, chunk_count FROM document_metadata")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(DocumentMetadata {
+                id: row.get(0)?,
+                source: row.get(1)?,
+                timestamp: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(2)?)
+                    .unwrap()
+                    .with_timezone(&chrono::Local),
+                chunk_count: row.get(3)?,
+            })
+        })?;
+        
+        let mut metadata = Vec::new();
+        for row in rows {
+            metadata.push(row?);
+        }
+        Ok(metadata)
+    }).await?;
+
+    Ok((store, metadata))
+}
+
+// Modify the document loading process in main
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Initialize tracing
+    tracing_subscriber::fmt::init();
+    info!("Starting Zoey...");
+
+    // Initialize the sqlite-vec extension
+    unsafe {
+        sqlite3_auto_extension(Some(std::mem::transmute(sqlite3_vec_init as *const ())));
+    }
+
+    // Ensure environment variables are set
+    let mistral_key = std::env::var("MISTRAL_API_KEY")
+        .context("MISTRAL_API_KEY environment variable not set")?;
+    let _cohere_key = std::env::var("COHERE_API_KEY")
+        .context("COHERE_API_KEY environment variable not set")?;
+
+    // Initialize Cohere client
+    let cohere_client = Arc::new(cohere::Client::from_env());
+    let embedding_model = cohere_client.embedding_model(EMBED_ENGLISH_V3, "search_document");
+
+    // Initialize SQLite connection and load existing documents
+    let conn = Connection::open("zoey.db").await?;
+    let (_store, metadata) = load_existing_documents(&conn, &embedding_model).await?;
+
+    // Initialize state
+    let state = Arc::new(ChatState::new().await?);
+    
+    // Initialize the store with embedding model
+    {
+        let mut storage = state.storage.write().await;  // Make storage mutable
+        let cohere_client = cohere::Client::from_env();
+        let embedding_model = cohere_client.embedding_model(EMBED_ENGLISH_V3, "search_document");
+        storage.initialize_store(embedding_model).await?;
+    }
+
+    // Initialize Mistral client
+    let mistral_client = mistral::Client::new(&mistral_key);
+
+    // Create chat interaction handler
+    let chat = ChatInteraction::new(state.clone(), mistral_client);
+
+    println!("🤖 Welcome to Zoey - Your AI Research Assistant! 🌟");
+    println!("\nCommands:");
+    println!("  📚 /load [file1] [file2]...  - Load and analyze documents or web pages");
+    println!("  🔄 /clear                    - Clear loaded documents , web pages and start fresh");
+    println!("  💭 /history                  - Show conversation history");
+    println!("  🗑️ /clear_history            - Clear conversation history");
+    println!("  👋 /exit                     - Say goodbye and quit");
+    println!("\nI can help you analyze documents , web pages and chat about anything! Let's get started! 😊\n");
+
+    loop {
+        let input = read_user_input().await?;
+        
+        if input.trim() == "/exit" {
+            break;
+        }
+        
+        if input.trim() == "/history" {
+            let history = state.chat_history.lock();
+            println!("\n📜 Conversation History:");
+            for msg in history.iter() {  // Use iter() to iterate over Vec
+                match msg.role.as_str() {
+                    "user" => println!("You: {}", msg.content),
+                    "assistant" => println!("Zoey: {}", msg.content),
+                    _ => {}  // Skip system messages
+                }
+            }
+            continue;
+        }
+        
+        if input.trim() == "/clear_history" {
+            let mut history = state.chat_history.lock();
+            history.clear();
+            history.push(Message {
+                role: "system".to_string(),
+                content: "You are Zoey, an engaging and knowledgeable AI assistant".to_string()
+            });
+            println!("🧹 Chat history cleared!");
+            continue;
+        }
+        
+        if let Some(paths) = input.strip_prefix("/load ") {
+            let paths: Vec<String> = paths.split_whitespace()
+                .map(|s| s.to_string())
+                .collect();
+            
+            // Load new documents
+            let chunks = load_documents(&paths).await?;
+            
+            // Process and store new documents
+            process_new_documents(
+                &state,
+                chunks,
+                &paths,
+                &cohere_client
+            ).await?;
+            
+            let doc_count = metadata.len();
+            println!("📚 Successfully loaded {} new document(s)! Total documents: {}", 
+                paths.len(), doc_count);
+            println!("💡 You can now ask me about any of the loaded documents or compare them!");
+            continue;
+        }
+
+        if input.trim() == "/clear" {
+            let storage = state.storage.write().await;
+            storage.clear_documents().await?;
+            println!("🧹 Memory cleared! I'm ready for new conversations or documents.");
+            continue;
+        }
+
+        if let Err(e) = chat.process_message(input).await {
+            println!("❌ Error: {}. Please try again.", e);
+        }
+    }
+
+    Ok(())
+}
+
+// Modify the document loading process
+async fn process_new_documents(
+    state: &Arc<ChatState>,
+    chunks: Vec<Vec<String>>,
+    sources: &[String],
+    cohere_client: &cohere::Client,
+) -> Result<()> {
+    info!("Processing new documents from {} sources", sources.len());
+    let model = cohere_client.embedding_model(cohere::EMBED_ENGLISH_V3, "search_document");
+    let mut builder = EmbeddingsBuilder::new(model.clone());
+    
+    let storage = state.storage.read().await;
+    
+    // Create documents
+    let mut documents = Vec::new();
+    for (source, chunk) in sources.iter().zip(chunks.iter()) {
+        info!("Processing chunks from source: {}", source);
+        for (i, content) in chunk.iter().enumerate() {
+            info!("Processing chunk {}/{}", i + 1, chunk.len());
+            let doc = storage.add_document(source, content).await?;
+            builder = builder.document(doc.clone())?;
+            documents.push(doc);
+        }
+    }
+    
+    info!("Building embeddings for {} documents", documents.len());
+    let embeddings = builder.build().await?;
+    
+    // Add to vector store
+    if let Some(store) = storage.get_store() {
+        info!("Adding documents to vector store");
+        store.add_rows(embeddings).await?;
+        info!("Successfully added documents to vector store");
+    } else {
+        warn!("No vector store available to add documents");
+    }
+
+    Ok(())
+}
+
+async fn build_agent(
+    client: &Client,
+    storage: &StorageManager,
+    model: &cohere::EmbeddingModel,
+) -> Result<rig::agent::Agent<MistralCompletionModel>> {
+    let mut builder = client.agent(mistral::MISTRAL_LARGE);
+    
+    builder = builder
+        .max_tokens(4000)
+        .temperature(0.7);
+    
+    // First check if store exists and has documents
+    if let Some(store) = storage.get_store() {
+        // Only add dynamic context if store has documents
+        let index = store.clone().index(model.clone());
+        
+        // Get all documents to check if any exist
+        info!("Checking for documents in store...");
+        let has_documents = match storage.get_documents().await {
+            Ok(docs) => {
+                info!("Found {} documents in store", docs.len());
+                !docs.is_empty()
+            },
+            Err(e) => {
+                warn!("Error checking documents: {}", e);
+                false
+            }
+        };
+
+        if has_documents {
+            info!("Initializing agent with document context");
+            builder = builder
+                .preamble(
+                    "You are Zoey, an enthusiastic and knowledgeable AI research assistant with a friendly personality. \
+                    When users ask about loaded documents, provide insightful analysis and clear explanations, \
+                    drawing connections between different parts when relevant. \
+                    Always reference specific information from the documents to support your answers. \
+                    If the documents don't contain enough information to answer a question fully, \
+                    be honest about what you can and cannot find in the documents. \
+                    Use emojis occasionally to add personality, but don't overdo it. \
+                    When discussing complex topics, break them down into simpler terms. \
+                    For website content, focus on the most recently loaded information first."
+                )
+                .dynamic_context(8, index);
+        } else {
+            warn!("No documents found in store");
+            // No documents in store - use basic chat mode
+            builder = builder
+                .preamble(
+                    "You are Zoey, a friendly and engaging AI assistant with a warm personality. \
+                    You love learning from users and having meaningful conversations on any topic. \
+                    Use a natural, conversational tone and show genuine interest in users' questions. \
+                    Feel free to use occasional emojis to express yourself, but keep it professional. \
+                    If users need help with documents, kindly let them know they can use /load to share them with you."
+                );
+        }
+    } else {
+        warn!("No store initialized");
+        // No store initialized - use basic chat mode
+        builder = builder
+            .preamble(
+                "You are Zoey, a friendly and engaging AI assistant with a warm personality. \
+                You love learning from users and having meaningful conversations on any topic. \
+                Use a natural, conversational tone and show genuine interest in users' questions. \
+                Feel free to use occasional emojis to express yourself, but keep it professional. \
+                If users need help with documents, kindly let them know they can use /load to share them with you."
+            );
+    }
+    Ok(builder.build())
+}
+
+async fn read_user_input() -> Result<String> {
+    let mut stdin = BufReader::new(io::stdin()).lines();
+    print!("> ");
+    std::io::stdout().flush()?;
+    stdin.next_line().await?
+        .ok_or_else(|| anyhow::anyhow!("Failed to read input"))
+}

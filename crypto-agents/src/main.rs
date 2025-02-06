@@ -1,7 +1,6 @@
 use anyhow::Result;
 use crypto_agents::MultiAgentSystem;
 use dotenv::dotenv;
-use std::env;
 
 #[tokio::main]
 async fn main() -> Result<()> {

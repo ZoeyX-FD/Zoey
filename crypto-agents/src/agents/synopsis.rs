@@ -49,17 +49,39 @@ impl SynopsisAgent {
         &self,
         agent_one_response: &str,
         agent_two_response: &str,
+        sentiment_response: Option<&str>,  // Make it optional
     ) -> Result<String> {
-        // Create a more focused prompt with key points only
-        let context = format!(
-            "Technical Analysis Key Points:\n{}\n\nFundamental Analysis Key Points:\n{}\n\nCreate a brief, focused synopsis highlighting only the most important points and actionable items.",
-            self.extract_key_points(agent_one_response),
-            self.extract_key_points(agent_two_response)
-        );
+        let mut key_points = String::new();
         
-        self.base.generate_response("Create a brief synopsis focusing on key decisions and actions.", Some(&context)).await
+        // Add technical analysis
+        if let Some(technical) = agent_one_response.split("Key Patterns:").nth(1) {
+            if let Some(end) = technical.find("\n\n") {
+                key_points.push_str(&technical[..end]);
+            }
+        }
+        
+        // Add fundamental analysis
+        if let Some(fundamental) = agent_two_response.split("Key Fundamentals:").nth(1) {
+            if let Some(end) = fundamental.find("\n\n") {
+                key_points.push_str("\n");
+                key_points.push_str(&fundamental[..end]);
+            }
+        }
+
+        // Add sentiment analysis if available
+        if let Some(sentiment) = sentiment_response {
+            if let Some(sentiment_part) = sentiment.split("Social Media Pulse:").nth(1) {
+                if let Some(end) = sentiment_part.find("\n\n") {
+                    key_points.push_str("\n");
+                    key_points.push_str(&sentiment_part[..end]);
+                }
+            }
+        }
+        
+        Ok(key_points)
     }
     
+    #[allow(dead_code)]
     fn extract_key_points(&self, text: &str) -> String {
         // Extract only sections with key points
         let mut key_points = String::new();
