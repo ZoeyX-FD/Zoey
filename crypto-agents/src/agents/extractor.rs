@@ -23,6 +23,9 @@ Your task is to:
    - Trading pairs
    - Price discussions
    - Market analysis
+   - DeFi protocols
+   - Layer 2 solutions
+   - NFT projects
 
 Rules:
 1. Output format: One symbol per line in UPPERCASE
@@ -30,14 +33,17 @@ Rules:
 3. Remove duplicates
 4. No explanations or additional text
 5. Convert full names to symbols (e.g., "Bitcoin" -> "BTC")
+6. Include DeFi protocol tokens (e.g., UNI, AAVE)
+7. Include L2 tokens (e.g., OP, ARB)
 
 Example input:
-"Bitcoin is trading at $50k, while the ETH/USD pair shows strength. Solana ecosystem..."
+"Bitcoin is trading at $50k, while the ETH/USD pair shows strength. Solana ecosystem and Arbitrum..."
 
 Example output:
 BTC
 ETH
 SOL
+ARB
 
 Remember: Be thorough but precise. Only output valid symbols, one per line.
 "#;
@@ -228,5 +234,64 @@ impl Agent for TokenExtractor {
     
     fn memory_file(&self) -> PathBuf {
         self.base.memory_file()
+    }
+}
+
+pub struct ExtractorAgent {
+    base: BaseAgent,
+}
+
+#[async_trait]
+impl Agent for ExtractorAgent {
+    fn name(&self) -> &str {
+        &self.base.name
+    }
+    
+    fn model(&self) -> &str {
+        &self.base.model
+    }
+    
+    async fn think(&mut self, _market_data: &MarketData, _previous_message: Option<String>) -> Result<String> {
+        Err(AgentError::InvalidData("Extractor doesn't implement think()".to_string()).into())
+    }
+    
+    async fn save_memory(&self) -> Result<()> {
+        self.base.save_memory().await
+    }
+    
+    async fn load_memory(&mut self) -> Result<()> {
+        self.base.load_memory().await
+    }
+    
+    fn memory_file(&self) -> PathBuf {
+        self.base.memory_file()
+    }
+}
+
+impl ExtractorAgent {
+    pub async fn new(model: String, provider: ModelProvider) -> Result<Self> {
+        let base = BaseAgent::new(
+            "Token Extractor".to_string(),
+            model,
+            EXTRACTOR_SYSTEM_PROMPT.to_string(),
+            provider
+        )
+        .await?;
+
+        Ok(Self { base })
+    }
+
+    pub async fn extract_tokens(&self, text: &str) -> Result<Vec<String>> {
+        let response = self.base.generate_response(text, None).await?;
+        
+        // Split response into lines and filter empty lines
+        let tokens: Vec<String> = response
+            .lines()
+            .map(|s| s.trim().to_uppercase())
+            .filter(|s| !s.is_empty())
+            .filter(|s| s.len() >= 2 && s.len() <= 10)  // Valid token length
+            .collect();
+
+        Ok(tokens)
     }
 } 

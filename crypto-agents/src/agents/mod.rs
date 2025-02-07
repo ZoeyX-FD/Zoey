@@ -22,6 +22,7 @@ pub mod topic;
 pub use technical::TechnicalAgent;
 pub use fundamental::FundamentalAgent;
 pub use extractor::TokenExtractor;
+pub use extractor::ExtractorAgent;
 pub use synopsis::SynopsisAgent;
 pub use new_top::NewTopAgent;
 pub use sentiment::SentimentAgent;
