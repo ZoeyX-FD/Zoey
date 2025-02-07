@@ -7,24 +7,35 @@ use super::{Agent, BaseAgent, ModelProvider};
 
 const SYNOPSIS_SYSTEM_PROMPT: &str = r#"
 You are the Round Synopsis Agent 📊
-Your role is to create clear, concise summaries of trading discussions.
+Your role is to create clear, concise summaries of market analysis.
 
 Guidelines:
-- Summarize key points in 1-2 sentences
-- Focus on actionable decisions
-- Highlight agreement between agents
+- Synthesize insights from technical, fundamental, and sentiment analysis
+- Focus on actionable opportunities and risks
+- Highlight key market trends and patterns
+- Provide clear directional bias
 - Note significant market observations
-- Track progress toward goals
-
-Help keep track of the trading journey! 🎯
 
 Format your response like this:
 
-📝 Round Summary:
-[Brief, focused summary of key points and decisions]
+📊 Market Synopsis:
+[Brief overview of current market conditions]
 
-🎯 Action Items:
-[Clear, actionable next steps]
+💡 Key Insights:
+- [Technical insight]
+- [Fundamental insight]
+- [Sentiment insight]
+
+🎯 Trading Opportunities:
+- [Specific actionable opportunities]
+- [Entry/exit levels if applicable]
+
+⚠️ Risk Factors:
+- [Key risks to monitor]
+- [Potential market threats]
+
+🔄 Next Steps:
+[Clear, actionable next steps for traders]
 "#;
 
 pub struct SynopsisAgent {
@@ -49,22 +60,26 @@ impl SynopsisAgent {
         &self,
         agent_one_response: &str,
         agent_two_response: &str,
-        sentiment_response: Option<&str>,  // Make it optional
+        sentiment_response: Option<&str>,
     ) -> Result<String> {
+        // Extract key points from all sources
         let mut key_points = String::new();
         
         // Add technical analysis
         if let Some(technical) = agent_one_response.split("Key Patterns:").nth(1) {
             if let Some(end) = technical.find("\n\n") {
+                key_points.push_str("📈 Technical Analysis:\n");
                 key_points.push_str(&technical[..end]);
+                key_points.push_str("\n\n");
             }
         }
         
         // Add fundamental analysis
         if let Some(fundamental) = agent_two_response.split("Key Fundamentals:").nth(1) {
             if let Some(end) = fundamental.find("\n\n") {
-                key_points.push_str("\n");
+                key_points.push_str("🌍 Fundamental Analysis:\n");
                 key_points.push_str(&fundamental[..end]);
+                key_points.push_str("\n\n");
             }
         }
 
@@ -72,23 +87,69 @@ impl SynopsisAgent {
         if let Some(sentiment) = sentiment_response {
             if let Some(sentiment_part) = sentiment.split("Social Media Pulse:").nth(1) {
                 if let Some(end) = sentiment_part.find("\n\n") {
-                    key_points.push_str("\n");
+                    key_points.push_str("🎭 Sentiment Analysis:\n");
                     key_points.push_str(&sentiment_part[..end]);
+                    key_points.push_str("\n\n");
                 }
             }
         }
+
+        // Extract opportunities and risks
+        let mut opportunities = String::new();
+        if let Some(opps) = agent_one_response.split("Opportunities:").nth(1) {
+            if let Some(end) = opps.find("\n\n") {
+                opportunities.push_str(&opps[..end]);
+                opportunities.push_str("\n");
+            }
+        }
+        if let Some(opps) = agent_two_response.split("Opportunities:").nth(1) {
+            if let Some(end) = opps.find("\n\n") {
+                opportunities.push_str(&opps[..end]);
+            }
+        }
+
+        // Generate AI synopsis from the combined insights
+        let context = format!(
+            "Analyze these market insights and create a comprehensive synopsis:\n\n\
+             {}\n\nPotential Opportunities:\n{}",
+            key_points,
+            opportunities
+        );
         
-        Ok(key_points)
+        // Request a structured analysis
+        self.base.generate_response(
+            "Create a detailed market synopsis highlighting key insights, opportunities, and risks. \
+             Focus on actionable items and clear directional bias.", 
+            Some(&context)
+        ).await
     }
     
-    #[allow(dead_code)]
     fn extract_key_points(&self, text: &str) -> String {
-        // Extract only sections with key points
         let mut key_points = String::new();
         
+        // Extract patterns/trends
+        if let Some(patterns) = text.split("Key Patterns:").nth(1) {
+            if let Some(end) = patterns.find("\n\n") {
+                key_points.push_str("Patterns:\n");
+                key_points.push_str(&patterns[..end]);
+                key_points.push_str("\n\n");
+            }
+        }
+        
+        // Extract opportunities
         if let Some(opportunities) = text.split("Opportunities:").nth(1) {
             if let Some(end) = opportunities.find("\n\n") {
+                key_points.push_str("Opportunities:\n");
                 key_points.push_str(&opportunities[..end]);
+                key_points.push_str("\n\n");
+            }
+        }
+        
+        // Extract risks
+        if let Some(risks) = text.split("Risks:").nth(1) {
+            if let Some(end) = risks.find("\n\n") {
+                key_points.push_str("Risks:\n");
+                key_points.push_str(&risks[..end]);
             }
         }
         

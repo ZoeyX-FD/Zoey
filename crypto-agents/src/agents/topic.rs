@@ -11,6 +11,7 @@ use crate::api::{
     social_media::SocialMediaPost
 };
 use super::{Agent, BaseAgent, ModelProvider};
+use crate::models::AgentError;
 
 const TOPIC_SYSTEM_PROMPT: &str = r#"
 You are the Topic Analysis Expert 🎯
@@ -313,24 +314,32 @@ Analyze the following topic data and provide detailed insights:
 
 {context}
 
-Provide your analysis in the following format:
+Please provide a comprehensive analysis with at least 3 points in each section, even if the data is limited.
+Focus on:
+1. Current state and developments
+2. Market sentiment and community reaction
+3. Technical developments and innovations
+4. Future potential and opportunities
+5. Possible risks and challenges
+
+Format your response EXACTLY as follows:
 
 KEY INSIGHTS:
-- [Key insight 1 about current state]
-- [Key insight 2 about market dynamics]
-- [Key insight 3 about notable developments]
+- [Key insight about current state]
+- [Key insight about market dynamics]
+- [Key insight about notable developments]
 
 CURRENT TRENDS:
-- [Trend 1 with supporting evidence]
-- [Trend 2 with supporting evidence]
-- [Trend 3 with supporting evidence]
+- [Trend with supporting evidence]
+- [Trend with market impact]
+- [Trend with future implications]
 
 RISKS AND CHALLENGES:
-- [Risk 1 with potential impact]
-- [Risk 2 with potential impact]
-- [Risk 3 with potential impact]
+- [Risk with potential impact]
+- [Challenge facing adoption]
+- [Market-related concern]
 
-Keep insights specific, data-driven, and actionable. Focus on patterns in sentiment and engagement."#
+Keep insights specific, data-driven, and actionable. If data is limited, provide analysis based on broader market context and similar projects."#
         );
 
         let response = self.base.generate_response(&prompt, None).await?;
@@ -339,6 +348,11 @@ Keep insights specific, data-driven, and actionable. Focus on patterns in sentim
         let key_projects = self.extract_section(&response, "KEY INSIGHTS:");
         let catalysts = self.extract_section(&response, "CURRENT TRENDS:");
         let risks = self.extract_section(&response, "RISKS AND CHALLENGES:");
+
+        // Ensure we have at least some content in each section
+        if key_projects.is_empty() || catalysts.is_empty() || risks.is_empty() {
+            return Err(AgentError::InvalidData("Incomplete analysis generated".to_string()).into());
+        }
 
         Ok(TopicAnalysis {
             timestamp: Utc::now().to_rfc3339(),

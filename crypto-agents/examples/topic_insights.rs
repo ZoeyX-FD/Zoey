@@ -58,16 +58,16 @@ async fn main() -> Result<()> {
     fs::create_dir_all(data_dir)?;
 
     // Initialize agents
-    let mut topic_agent = TopicAgent::new(
-        "deepseek/deepseek-r1:free".to_string(),
+    let topic_agent = TopicAgent::new(
+        "mistralai/mistral-nemo".to_string(),
         ModelProvider::OpenRouter
     ).await?;
 
     let social = SocialMediaClient::new().await?;
 
     let topics = vec![
-        "apex legend",
-        "algs",
+        "meme coin",
+        "solana agent ai",
     ];
 
     let mut reports = Vec::new();
@@ -180,12 +180,40 @@ async fn main() -> Result<()> {
 
         // Get AI analysis and update the report
         if let Ok(analysis) = topic_agent.analyze_topic(&context).await {
+            // Display analysis in console with emojis and formatting
+            println!("\n🧠 AI Analysis Results:");
+            println!("====================");
+
+            println!("\n💡 Key Insights:");
+            for insight in &analysis.key_projects {
+                println!("  • {}", insight);
+            }
+
+            println!("\n📈 Current Trends:");
+            for trend in &analysis.catalysts {
+                println!("  • {}", trend);
+            }
+
+            println!("\n⚠️ Risks and Challenges:");
+            for risk in &analysis.risks {
+                println!("  • {}", risk);
+            }
+
+            // Update report after displaying
             report.analysis = AnalysisData {
-                key_insights: analysis.key_projects,
-                trends: analysis.catalysts,
-                risks: analysis.risks,
+                key_insights: analysis.key_projects.clone(),
+                trends: analysis.catalysts.clone(),
+                risks: analysis.risks.clone(),
             };
             reports.push(report.clone());
+
+            println!("\n📊 Sentiment Overview:");
+            println!("  • Positive: {}%", report.metrics.sentiment_distribution.positive);
+            println!("  • Neutral:  {}%", report.metrics.sentiment_distribution.neutral);
+            println!("  • Negative: {}%", report.metrics.sentiment_distribution.negative);
+
+        } else {
+            println!("⚠️ Failed to generate AI analysis");
         }
 
         // Save individual report

@@ -136,7 +136,7 @@ impl CoinGeckoClient {
         Ok(response.status().is_success())
     }
     
-    pub async fn get_global_data(&self) -> Result<GlobalData> {
+    async fn get_global_data(&self) -> Result<GlobalData> {
         let response: Value = self.client
             .get(&format!("{}/global", BASE_URL))
             .header("Accept", "application/json")
@@ -144,18 +144,21 @@ impl CoinGeckoClient {
             .await?
             .json()
             .await?;
-            
-        let data = response.as_object()
-            .ok_or_else(|| AgentError::InvalidData("Invalid global data format".to_string()))?;
-            
+
+        // The data is nested under "data" in the response
+        let data = response.get("data")
+            .ok_or_else(|| AgentError::InvalidData("No data field in global response".to_string()))?;
+
         Ok(GlobalData {
-            total_market_cap: data.get("total_mcap")
+            total_market_cap: data.get("total_market_cap")
+                .and_then(|v| v.get("usd"))
                 .and_then(|v| v.as_f64())
                 .unwrap_or_default(),
             total_volume: data.get("total_volume")
+                .and_then(|v| v.get("usd"))
                 .and_then(|v| v.as_f64())
                 .unwrap_or_default(),
-            market_cap_change_percentage_24h: data.get("mcap_change_percentage")
+            market_cap_change_percentage_24h: data.get("market_cap_change_percentage_24h_usd")
                 .and_then(|v| v.as_f64())
                 .unwrap_or_default(),
             active_cryptocurrencies: data.get("active_cryptocurrencies")
@@ -193,6 +196,7 @@ impl CoinGeckoClient {
         Ok(trending)
     }
     
+    #[allow(dead_code)]
     async fn get_coin_data(&self, id: &str) -> Result<CoinData> {
         let response: Value = self.client
             .get(&format!("{}/coins/{}", BASE_URL, id))
@@ -214,20 +218,43 @@ impl CoinGeckoClient {
     
     pub async fn get_market_data(&self) -> Result<MarketData> {
         // Get global data
-        let overview = self.get_global_data().await?;
+        let global_data = self.get_global_data().await?;
+        
+        // Debug print
+        println!("Debug: Global Market Data");
+        println!("Market Cap: ${:.2}B", global_data.total_market_cap / 1_000_000_000.0);
+        println!("Volume: ${:.2}B", global_data.total_volume / 1_000_000_000.0);
+        println!("Active Coins: {}", global_data.active_cryptocurrencies);
+        println!("24h Change: {:.2}%", global_data.market_cap_change_percentage_24h);
+
+        // Get Bitcoin data
+        let btc_data = self.get_detailed_coin_data("bitcoin").await?;
+        
+        // Get Ethereum data
+        let eth_data = self.get_detailed_coin_data("ethereum").await?;
         
         // Get trending coins
         let trending = self.get_trending_coins().await?;
-        
-        // Get BTC and ETH data
-        let bitcoin = self.get_coin_data("bitcoin").await?;
-        let ethereum = self.get_coin_data("ethereum").await?;
-        
+
         Ok(MarketData {
-            overview,
+            overview: global_data,
             trending,
-            bitcoin,
-            ethereum,
+            bitcoin: CoinData {
+                id: "bitcoin".to_string(),
+                symbol: "BTC".to_string(),
+                name: "Bitcoin".to_string(),
+                current_price: btc_data.current_price,
+                market_cap: btc_data.market_cap,
+                price_change_24h: btc_data.price_change_24h.unwrap_or(0.0),
+            },
+            ethereum: CoinData {
+                id: "ethereum".to_string(),
+                symbol: "ETH".to_string(),
+                name: "Ethereum".to_string(),
+                current_price: eth_data.current_price,
+                market_cap: eth_data.market_cap,
+                price_change_24h: eth_data.price_change_24h.unwrap_or(0.0),
+            },
             recent_history: None,
         })
     }

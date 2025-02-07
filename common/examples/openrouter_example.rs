@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
     }
 
     // Example 2: Chat completion with GPT-4
-    let gpt4 = client.completion_model("openai/o3-mini");
+    let gpt4 = client.completion_model("openai/gpt-4o-mini");
     let request = CompletionRequest {
         prompt: "Explain quantum computing".to_string(),
         preamble: Some("You are a helpful physics professor.".to_string()),
