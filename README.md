@@ -6,9 +6,17 @@ im newbie , just only start 1st learning coding in early january 2025
 
 im use Arc Rig Framework on rust , my 1st programming languange 
 
-for agent crypto folder mostly based idea by moondev ( coingecko agent , newtop agent ) but work in rust
+for agent crypto folder mostly based idea by moondev ( coingecko agent , newtop agent ) but modified and work in rust
 
-u can start by this for crypto research 
+u can start by this for crypto research , 
+
+disclaimer this is not trading Agent, but Research crypto agent or coin gecko agent 😁
+
+u must install Rust before begin 
+
+https://www.rust-lang.org/tools/install
+
+clone my repo and start
 
 ===================
 
@@ -16,13 +24,14 @@ cargo run -p crypto-agents
 
 ===================
 
-before that u must have coingecko api ( im using free api coingecko ) 
+before that u must have coingecko api 
+( im using free api coingecko ) 
 
 must have twitter account , add cookie too , u can check .env.example and then copy changes to .env 
 
 to get cookie , you can check on folder agent-twitter-client 
 
- im use diffrent provider ( deepseek, mistral , openai, openrouter ,gemini or cohere ) if uhave just 1 provider , is ok , provider like cohere , gemini , mistral is free 
+ im use diffrent provider ( deepseek, mistral , openai, openrouter ,gemini or cohere ) if uhave just 1 provider , is ok , provider like cohere , gemini , mistral are free 
 
 add your provider api key on .env too 
 
@@ -43,7 +52,9 @@ coin analysis agent for see coin you want watch and then linked to twitter searc
 make sure the coin and name coin same like the website coingecko 
 
 SOl , solana
+
 JUP , jupiter
+
 BTC , bitcoin
 
 ====================
@@ -78,9 +89,18 @@ not many website can scrap, but u must try 😁
 
 ========================
 
+to check provider like mistral and openrouter work , u can check this , because this custom module in common folder , not in rig core , but integrated to rig framework 
+
+cargo run --example mistral_trading
+
+cargo run --example openrouter_example
+
+========================
+
 thx for
 
-@moondev
-@Arcdotfun
-@agent-twitter-clients  
+@moondev for my inspiration and my idol , i learn many think from you 
+
+@Arcdotfun  Rig-framework 
+@agent-twitter-clients created by = Rina 
 
