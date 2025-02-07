@@ -59,9 +59,9 @@ BTC , bitcoin
 
 ====================
 
-cargo run --example topic_analysis
+cargo run --example topic_insight
 
-this topic analysis agent can search ur topic and then search to twitter for see sentiment analysis 
+this topic insight agent can search ur choosing topic and then search to twitter for see sentiment analysis 
 
 example topic = agent ai , solana ecosystem , or bitcoin , or u can choose freely, the agent can search based your choose topic and give sentiment result 
 
