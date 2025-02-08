@@ -24,6 +24,8 @@ pub struct TrendingCoin {
     pub symbol: String,
     pub name: String,
     pub price_btc: f64,
+    #[serde(default)]
+    pub market_cap_rank: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

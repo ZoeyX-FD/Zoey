@@ -22,6 +22,7 @@ const DEFAULT_MODELS: &[(&str, &str)] = &[
     ("deepseek", "deepseek-reasoner"),
     ("deepseek", "deepseek-chat"),
     ("gemini", "gemini-2.0-flash-exp"),
+    ("gemini", "gemini-2.0-flash-001"),
     ("mistral", "mistral-large-latest"),
     ("mistral", "mistral-small-latest"),
     ("openai", "gpt-4o-mini"),
@@ -281,14 +282,18 @@ impl MultiAgentSystem {
         println!("📊 Gathering Market Intelligence...");
         let market_data = self.api.get_market_data().await?;
         
-        // Get technical analysis
+        // Get technical indicators data
+        println!("📈 Fetching Technical Data...");
+        let technical_data = self.api.get_technical_analysis().await?;
+
+        // Let technical agent analyze the data
         println!("\n🔍 Technical Analysis Phase...");
         let technical_response = self.technical_agent
-            .think(&market_data, None)
+            .analyze_technical_data(&market_data, &technical_data)
             .await?;
         println!("{}", technical_response);
         
-        // Get fundamental analysis
+        // Get fundamental analysis with technical context
         println!("\n🌍 Fundamental Analysis Phase...");
         let fundamental_response = self.fundamental_agent
             .think(&market_data, Some(technical_response.clone()))
@@ -302,18 +307,22 @@ impl MultiAgentSystem {
             .await?;
         println!("{}", sentiment_response);
         
-        // Extract tokens
+        // Extract tokens with context from all analyses
         println!("\n🔍 Extracting Token Mentions...");
         let round = self.round_history.len() as i32;
         let tokens = self.token_extractor
-            .extract_tokens(round, &technical_response, &fundamental_response)
+            .extract_tokens(
+                round,
+                &technical_response,
+                &fundamental_response
+            )
             .await?;
         println!("Found {} token mentions:", tokens.len());
         for token in &tokens {
             println!("  • {} ({})", token.token, token.context);
         }
         
-        // Generate synopsis
+        // Generate synopsis with all data
         println!("\n📝 Generating Round Synopsis...");
         let synopsis = self.synopsis_agent
             .generate_synopsis(

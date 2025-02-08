@@ -124,6 +124,7 @@ impl SynopsisAgent {
         ).await
     }
     
+    #[allow(dead_code)]
     fn extract_key_points(&self, text: &str) -> String {
         let mut key_points = String::new();
         
