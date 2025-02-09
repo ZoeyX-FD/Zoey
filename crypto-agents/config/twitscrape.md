@@ -61,7 +61,7 @@ Optional:
 cargo run --example twitter_follow_extract username 300 7 ( this tells the program to fetch max 300 of the latest tweets from the user in the last 7 days)
 
 # Detailed analysis with AI
-cargo run --example twitter_follow_extract username 300 7 ai ( this will use the AI to analyze the tweets and provide a detailed analysis)
+cargo run --example twitter_follow_extract username 300 7 ai ( this will use the AI to analyze the 300 latest tweets from the user in the last 7 days and provide a detailed analysis)
 
 # Multiple users from file
 cargo run --example twitter_follow_extract -- --file users.txt 50 1 ai ( this will use the AI to analyze the tweets and provide a detailed analysis for each user in the users.txt on root directory folder)

@@ -18,8 +18,8 @@ async fn main() -> anyhow::Result<()> {
     let client = SocialMediaClient::new().await?;
     
     // Test with BTC
-    println!("🔍 Fetching BTC tweets...");
-    match client.get_twitter_sentiment("BTC").await {
+    println!("🔍 Fetching BERA tweets...");
+    match client.get_twitter_sentiment("BERA").await {
         Ok(tweets) => {
             println!("\n📊 Found {} tweets", tweets.len());
             

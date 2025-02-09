@@ -159,8 +159,8 @@ async fn analyze_user_profile(tweets: &[TweetData], stats: &TweetStats, username
     ).await?;
 
     let extractor_agent = ExtractorAgent::new(
-        "mistral-small-latest".to_string(),
-        ModelProvider::Mistral
+        "google/gemini-2.0-flash-001".to_string(),
+        ModelProvider::OpenRouter
     ).await?;
 
     // Convert tweets to string
