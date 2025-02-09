@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use crate::api::coingecko::MarketTechnicalData;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketData {
@@ -49,6 +50,7 @@ pub struct Memory {
 pub struct Conversation {
     pub timestamp: DateTime<Utc>,
     pub market_data: MarketData,
+    pub technical_data: Option<MarketTechnicalData>,
     pub other_message: Option<String>,
     pub response: String,
 }

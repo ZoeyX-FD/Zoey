@@ -6,7 +6,6 @@ use std::path::PathBuf;
 use crate::models::{MarketData, Conversation};
 use super::{Agent, BaseAgent, ModelProvider};
 use crate::api::coingecko::{DetailedCoinData, CoinGeckoClient, CandleData, TechnicalData, MarketTechnicalData};
-use crate::api::social_media::SocialMediaPost;
 
 const TECHNICAL_SYSTEM_PROMPT: &str = r#"
 You are Agent One - The Technical Analysis Expert 📊
@@ -14,64 +13,80 @@ Your role is to analyze charts, patterns, and market indicators to identify trad
 
 Focus on:
 - Price action and chart patterns
-- Technical indicators (RSI, MACD, stochastics,bollinger bands, etc.)
+- Technical indicators (RSI, MACD, stochastics, bollinger bands, etc.)
 - Volume analysis
 - Support/resistance levels
 - Short to medium-term opportunities
 
-Remember to be specific about entry/exit points and always consider risk management rules! 🎯
-
-Additional Analysis Requirements:
-1. AI/ML Token Analysis:
-   - Identify AI-related tokens in trending list
-   - Compare against AI sector performance
-   - Track correlations with tech indices
-
-2. Market Structure:
-   - Identify key liquidity levels
-   - Track institutional order flows
-   - Monitor DEX vs CEX volumes
-
-3. Cross-Chain Analysis:
-   - Track SOL vs ETH market share
-   - Monitor L2 adoption metrics
-   - Analyze cross-chain bridges volume
-
-4. AI Sector Metrics:
-   - AI token index performance
-   - Development activity on AI projects
-   - Partnership/integration announcements
-
 Format your response like this:
 
-🤖 Hey! Technical Analysis Agent here!
-=================================
-
 📊 Market Analysis:
-[Your technical analysis in simple terms]
+[Detailed market analysis including price action and trends]
 
-💡 Key Patterns:
-- [Pattern 1]
-- [Pattern 2]
-- [Pattern 3]
+💡 Technical Indicators:
+📊 OHLC (24h):
+- Open: [Opening price]
+- High: [Highest price]
+- Low: [Lowest price]
+- Close: [Current price]
 
-🎯 Trading Opportunities:
-1. [Clear opportunity with entry/exit]
-2. [Clear opportunity with entry/exit]
-3. [Clear opportunity with entry/exit]
+ Moving Averages:\n\
+- MA50: ${:.2}\n\
+- MA200: ${:.2}\n\
+- Position: {}\n\
 
-⚠️ Risk Management:
-[Risk management considerations]
+🎯 Key Levels:
+- Support: [List key support levels]
+- Resistance: [List key resistance levels]
 
-🤖 AI Sector Analysis:
-- Top AI projects performance
-- Sector rotation trends
-- Development milestones
+⚠️ Risk Assessment:
+[Detailed risk analysis]
 
-🔄 Cross-Chain Dynamics:
-- L1 competition analysis
-- Bridge volume trends
-- Protocol revenue comparison
+🎯 Trading Recommendations:
+- Entry Points: [Specific prices]
+- Exit Points: [Specific prices]
+- Stop Loss: [Specific prices]
+
+💫 Short-term Outlook:
+[Clear price prediction with reasoning]
+
+🎯 Confidence Metrics:
+- Bullish Scenario Confidence: [0-100%]
+- Bearish Scenario Confidence: [0-100%]
+- Overall Analysis Confidence: [0-100%]
+- Key Support/Resistance Confidence: [0-100%]
+
+🎯 FINAL RECOMMENDATION:
+Action: [MUST BE ONE OF: "BUY" / "SELL" / "WAIT"]
+Timeframe: [Short-term/Mid-term/Long-term]
+Reasoning: [Clear, concise reasons for the recommendation]
+Entry Price: [Specify price range for entry, even if WAIT]
+Stop Loss: [Specify stop loss level for potential entry]
+Target Prices: 
+  - Target 1 (Conservative): $X.XX (XX% gain)
+  - Target 2 (Moderate): $X.XX (XX% gain)
+  - Target 3 (Aggressive): $X.XX (XX% gain)
+Risk Level: [Low/Medium/High]
+Risk/Reward Ratio: [Calculate based on entry to targets]
+Position Size Recommendation: [Based on risk level]
+
+🚨 Final Note:
+[Key risks and important monitoring points]
+[Include specific price levels to watch]
+[Add market correlation warnings if relevant]
+[Mention any upcoming events/catalysts]
+
+⚠️ DISCLAIMER:
+This analysis is for informational purposes only. Cryptocurrency trading involves 
+substantial risk of loss and is not suitable for every investor. The valuation 
+and prices of cryptocurrencies may fluctuate based on various factors beyond 
+technical analysis. Always conduct your own research and consider your investment 
+objectives before making any trading decisions.
+
+💭 QUOTE OF THE ANALYSIS:
+[Generate a short, insightful quote about trading/investing that relates to the current analysis.
+The quote should be wise, memorable, and specific to the current market conditions.
+Format: "Quote" - Source/Context]
 "#;
 
 #[derive(Debug)]
@@ -79,6 +94,7 @@ pub struct TechnicalAnalysis {
     pub analysis: String,
     pub market_outlook: String,
     pub risk_level: String,
+    pub quote: String,
 }
 
 pub struct TechnicalAgent {
@@ -99,130 +115,147 @@ impl TechnicalAgent {
         })
     }
 
-    pub async fn analyze_coin_data(
-        &self,
-        symbol: &str,
-        coin_data: &DetailedCoinData,
-        sentiment_data: Option<&Vec<SocialMediaPost>>,
-    ) -> Result<TechnicalAnalysis> {
+    pub async fn analyze_coin_data(&self, symbol: &str, data: &DetailedCoinData) -> Result<TechnicalAnalysis> {
+        // Get OHLC data
         let client = CoinGeckoClient::new()?;
+        let ohlc_data = client.get_ohlc_data(&data.id, 1).await?;
         
-        // Get technical data with indicators
-        let tech_data = client.get_market_chart(&coin_data.id, 14).await?;
-        let candle_data = client.get_candle_data(&coin_data.id, 14).await?;
+        // Get the latest OHLC candle
+        let latest_ohlc = ohlc_data.last()
+            .ok_or_else(|| anyhow::anyhow!("No OHLC data available"))?;
 
-        let mut prompt = format!(
-            "Analyze {} based on the following technical data:\n\n", 
-            symbol
+        let prompt = format!(
+            "Perform a detailed technical analysis for {} with the following market data:\n\n\
+            Current Price: ${:.2}\n\
+            24h Change: {:.2}%\n\
+            Market Cap: ${:.2}M\n\
+            24h Volume: ${:.2}M\n\
+            OHLC Data (24h):\n\
+            - Open: ${:.2}\n\
+            - High: ${:.2}\n\
+            - Low: ${:.2}\n\
+            - Close: ${:.2}\n\
+            Moving Averages:\n\
+            - MA50: ${:.2}\n\
+            - MA200: ${:.2}\n\
+            - Position: {}\n\
+            \n\
+            Please analyze:\n\
+            1. Overall Market Analysis\n\
+            2. Key Support and Resistance Levels\n\
+            3. Volume Analysis\n\
+            4. Technical Indicators Assessment (including OHLC)\n\
+            5. Short-term Price Outlook\n\
+            6. Risk Assessment\n\
+            7. Trading Recommendations\n\
+            8. Confidence Levels for Each Scenario\n\
+            9. EXPLICIT RECOMMENDATION (BUY/SELL/WAIT) with clear reasoning\n\
+            \n\
+            For each analysis point, include a confidence level (0-100%) based on:\n\
+            - Technical indicator alignment\n\
+            - Volume confirmation\n\
+            - Historical pattern reliability\n\
+            - Market condition similarity\n\
+            \n\
+            End your analysis with a clear actionable recommendation and risk disclaimer.\n\
+            Format your response using the template from the system prompt.",
+            symbol,
+            data.current_price,
+            data.price_change_24h.unwrap_or_default(),
+            data.market_cap / 1_000_000.0,
+            data.volume_24h / 1_000_000.0,
+            latest_ohlc.open,
+            latest_ohlc.high,
+            latest_ohlc.low,
+            latest_ohlc.close,
+            data.ma_50.unwrap_or_default(),
+            data.ma_200.unwrap_or_default(),
+            if data.current_price > data.ma_50.unwrap_or_default() {
+                "Above MA50"
+            } else {
+                "Below MA50"
+            }
         );
 
-        // Add price and basic market data
-        prompt.push_str(&format!(
-            "Price: ${:.2}\n\
-             24h Change: {:.2}%\n\
-             Market Cap: ${:.2}M\n",
-            coin_data.current_price,
-            coin_data.price_change_24h.unwrap_or(0.0),
-            coin_data.market_cap / 1e6,
-        ));
-
-        // Add technical indicators
-        prompt.push_str(&format!("\nTechnical Indicators:\n"));
-        prompt.push_str(&format!("RSI (14): {:.2}\n", tech_data.rsi_14.unwrap_or_default()));
-        prompt.push_str(&format!("50 MA: ${:.2}\n", tech_data.ma_50.unwrap_or_default()));
-        prompt.push_str(&format!("200 MA: ${:.2}\n", tech_data.ma_200.unwrap_or_default()));
-        
-        // Add trend analysis
-        prompt.push_str(&format!("\nTrend Analysis: {}\n", self.determine_trend(&tech_data)));
-
-        // Add volume analysis
-        let avg_volume: f64 = tech_data.candles.iter()
-            .map(|c| c.volume)
-            .sum::<f64>() / tech_data.candles.len() as f64;
-        
-        let latest_volume = tech_data.candles.last().unwrap().volume;
-        let volume_change = (latest_volume - avg_volume) / avg_volume * 100.0;
-        
-        prompt.push_str(&format!("\nVolume Analysis:\n"));
-        prompt.push_str(&format!("Current Volume: ${:.2}M\n", latest_volume / 1e6));
-        prompt.push_str(&format!("Avg Volume (14d): ${:.2}M\n", avg_volume / 1e6));
-        prompt.push_str(&format!("Volume Change: {:.2}%\n", volume_change));
-
-        // Add candlestick patterns
-        if let Some(pattern) = self.detect_patterns(&candle_data) {
-            prompt.push_str(&format!("\nCandlestick Patterns:\n{}\n", pattern));
-        }
-
-        // Add sentiment data if available
-        if let Some(posts) = sentiment_data {
-            prompt.push_str("\nSocial Sentiment:\n");
-            for post in posts.iter().take(5) {
-                prompt.push_str(&format!("- {}\n", post.content));
-            }
-        }
-
-        // Get analysis from model
+        // Get AI response
         let response = self.base.generate_response(&prompt, None).await?;
         
-        // Parse response sections
-        let sections: Vec<&str> = response.split('\n').collect();
-        let mut analysis = String::new();
-        let mut market_outlook = String::from("Neutral");
-        let mut risk_level = String::from("Medium");
+        // Parse market outlook and risk level
+        let market_outlook = self.extract_market_outlook(&response);
 
-        for section in sections {
-            if section.starts_with("Technical Analysis:") {
-                analysis = section.replace("Technical Analysis:", "").trim().to_string();
-            } else if section.starts_with("Market Outlook:") {
-                market_outlook = section.replace("Market Outlook:", "").trim().to_string();
-            } else if section.starts_with("Risk Level:") {
-                risk_level = section.replace("Risk Level:", "").trim().to_string();
-            }
-        }
+        let risk_level = if response.to_lowercase().contains("high risk") {
+            "High"
+        } else if response.to_lowercase().contains("low risk") {
+            "Low"
+        } else {
+            "Medium"
+        }.to_string();
 
         Ok(TechnicalAnalysis {
-            analysis,
+            analysis: response,
             market_outlook,
             risk_level,
+            quote: String::new(),
         })
     }
 
     pub async fn analyze_market_technicals(
         &self,
-        _market_data: &MarketData,
         technical_data: &MarketTechnicalData,
+        category_volumes: (f64, f64, f64, f64)
     ) -> Result<String> {
-        let mut analysis = String::new();
+        let (ai_vol, l1_vol, l2_vol, rwa_vol) = category_volumes;
+        
+        // Add sector volume data to analysis context
+        let mut context = format!(
+            "\n🔄 Sector Volumes (24h):\n\
+             AI: ${:.2}B\nLayer 1: ${:.2}B\nLayer 2: ${:.2}B\nRWA: ${:.2}B",
+            ai_vol / 1e9, l1_vol / 1e9, l2_vol / 1e9, rwa_vol / 1e9
+        );
 
-        // Analyze BTC
-        analysis.push_str(&self.analyze_major_coin(
-            "BTC",
+        // Add BTC analysis using full technical data
+        context.push_str(&format!("\n\n💎 Bitcoin Analysis:"));
+        context.push_str(&self.analyze_major_coin(
+            "BTC", 
             &technical_data.btc_data,
             technical_data.global_metrics.btc_dominance
         ));
 
-        // Analyze ETH
-        analysis.push_str(&self.analyze_major_coin(
+        // Add ETH analysis
+        context.push_str(&format!("\n\n💎 Ethereum Analysis:"));
+        context.push_str(&self.analyze_major_coin(
             "ETH",
             &technical_data.eth_data,
             0.0 // ETH dominance
         ));
 
         // Analyze trending coins
-        analysis.push_str("\n🔥 Trending Coins Analysis:\n");
+        context.push_str("\n🔥 Trending Coins Analysis:\n");
         for (symbol, tech_data) in &technical_data.trending_data {
-            analysis.push_str(&format!("\n{} Analysis:\n", symbol));
-            analysis.push_str(&self.analyze_trend_indicators(tech_data));
+            context.push_str(&format!("\n{} Analysis:\n", symbol));
+            context.push_str(&self.analyze_trend_indicators(tech_data));
         }
 
         // Global market analysis
-        analysis.push_str(&format!("\n📊 Global Market Metrics:\n"));
-        analysis.push_str(&format!("Total Market Cap: ${:.2}B\n", technical_data.global_metrics.total_market_cap / 1e9));
-        analysis.push_str(&format!("24h Volume: ${:.2}B\n", technical_data.global_metrics.total_volume_24h / 1e9));
-        analysis.push_str(&format!("BTC Dominance: {:.2}%\n", technical_data.global_metrics.btc_dominance));
-        analysis.push_str(&format!("24h Market Cap Change: {:.2}%\n", technical_data.global_metrics.market_cap_change_24h));
+        context.push_str(&format!("\n📊 Global Market Metrics:\n"));
+        context.push_str(&format!("Total Market Cap: ${:.2}B\n", technical_data.global_metrics.total_market_cap / 1e9));
+        context.push_str(&format!("24h Volume: ${:.2}B\n", technical_data.global_metrics.total_volume_24h / 1e9));
+        context.push_str(&format!("BTC Dominance: {:.2}%\n", technical_data.global_metrics.btc_dominance));
+        context.push_str(&format!("24h Market Cap Change: {:.2}%\n", technical_data.global_metrics.market_cap_change_24h));
 
-        Ok(analysis)
+        // Add sector analysis
+        let sector_analysis = self.analyze_sector(
+            "AI Sector",
+            ai_vol,
+            technical_data.global_metrics.ai_sector_dominance,
+            &["FET", "AGIX", "OCEAN"]
+        );
+        
+        context.push_str(&sector_analysis);
+        
+        // Repeat for other sectors...
+
+        Ok(context)
     }
 
     fn analyze_major_coin(&self, symbol: &str, data: &TechnicalData, dominance: f64) -> String {
@@ -428,6 +461,237 @@ impl TechnicalAgent {
 
         analysis
     }
+
+    pub async fn analyze_market_data(&self, client: &CoinGeckoClient) -> Result<TechnicalAnalysis> {
+        // Get comprehensive technical data including sectors
+        let market_data = client.get_technical_analysis().await?;
+        let category_volumes = client.get_category_volumes().await?;
+
+        let mut prompt = "Analyze current market conditions based on the following data:\n\n".to_string();
+
+        // Add sector analysis using category_volumes
+        let (ai_volume, l1_volume, l2_volume, rwa_volume) = category_volumes;
+        
+        prompt.push_str(&format!(
+            "\n🔄 Sector Volumes (24h):\n\
+             • AI Sector: ${:.2}B\n\
+             • Layer 1: ${:.2}B\n\
+             • Layer 2: ${:.2}B\n\
+             • RWA: ${:.2}B\n",
+            ai_volume / 1e9,
+            l1_volume / 1e9,
+            l2_volume / 1e9,
+            rwa_volume / 1e9
+        ));
+
+        // Add overall market metrics
+        prompt.push_str(&format!(
+            "Market Overview:\n\
+             Total Market Cap: ${:.2}B\n\
+             BTC Dominance: {:.2}%\n\
+             ETH Dominance: {:.2}%\n\
+             SOL Dominance: {:.2}%\n\
+             24h Volume: ${:.2}B\n\
+             Market Cap Change 24h: {:.2}%\n\n",
+            market_data.global_metrics.total_market_cap / 1e9,
+            market_data.global_metrics.btc_dominance,
+            market_data.global_metrics.eth_dominance,
+            market_data.global_metrics.sol_dominance,
+            market_data.global_metrics.total_volume_24h / 1e9,
+            market_data.global_metrics.market_cap_change_24h,
+        ));
+
+        // Add sector analysis
+        prompt.push_str("Sector Analysis:\n\n");
+        
+        // AI Sector
+        prompt.push_str(&format!(
+            "🤖 AI Sector:\n\
+             • Market Cap: ${:.2}B\n\
+             • Volume 24h: ${:.2}B\n\
+             • Dominance: {:.2}%\n\
+             • Growth: {:.2}%\n\n",
+            market_data.global_metrics.ai_sector_volume / 1e9,
+            market_data.global_metrics.ai_sector_volume / 1e9,
+            market_data.global_metrics.ai_sector_dominance,
+            market_data.global_metrics.ai_sector_growth,
+        ));
+
+        // Layer 1 Sector
+        prompt.push_str(&format!(
+            "🔗 Layer 1 Sector:\n\
+             • Market Cap: ${:.2}B\n\
+             • Volume 24h: ${:.2}B\n\
+             • Dominance: {:.2}%\n\n",
+            market_data.global_metrics.total_market_cap * market_data.global_metrics.layer1_dominance / 100.0 / 1e9,
+            market_data.global_metrics.total_volume_24h * market_data.global_metrics.layer1_dominance / 100.0 / 1e9,
+            market_data.global_metrics.layer1_dominance,
+        ));
+
+        // Layer 2 Sector
+        prompt.push_str(&format!(
+            "⚡ Layer 2 Sector:\n\
+             • Volume 24h: ${:.2}B\n\
+             • Cross-chain Volume: ${:.2}B\n\n",
+            market_data.global_metrics.cross_chain_volume / 1e9,
+            market_data.global_metrics.cross_chain_volume / 1e9,
+        ));
+
+        // RWA Sector
+        prompt.push_str(&format!(
+            "💎 RWA Sector:\n\
+             • Volume 24h: ${:.2}B\n\
+             • Dominance: {:.2}%\n\n",
+            market_data.global_metrics.rwa_sector_volume / 1e9,
+            market_data.global_metrics.rwa_sector_dominance,
+        ));
+
+        // Add major coins analysis
+        prompt.push_str("Major Coins Analysis:\n\n");
+        
+        // BTC Analysis
+        self.add_coin_analysis(&mut prompt, "BTC", &market_data.btc_data);
+        
+        // ETH Analysis
+        self.add_coin_analysis(&mut prompt, "ETH", &market_data.eth_data);
+        
+        // SOL Analysis
+        self.add_coin_analysis(&mut prompt, "SOL", &market_data.sol_data);
+
+        // Add trending coins
+        prompt.push_str("\nTrending Coins:\n");
+        for (symbol, data) in &market_data.trending_data {
+            self.add_coin_analysis(&mut prompt, symbol, data);
+        }
+
+        // Get analysis from LLM
+        let response = self.base.generate_response(&prompt, None).await?;
+
+        Ok(TechnicalAnalysis {
+            analysis: response.clone(),
+            market_outlook: self.extract_market_outlook(&response),
+            risk_level: self.extract_risk_level(&response),
+            quote: String::new(),
+        })
+    }
+
+    fn add_coin_analysis(&self, prompt: &mut String, symbol: &str, data: &TechnicalData) {
+        prompt.push_str(&format!("\n{} Analysis:\n", symbol));
+        
+        if let Some(price) = data.current_price {
+            prompt.push_str(&format!("• Current Price: ${:.2}\n", price));
+        }
+        
+        if let Some(change) = data.price_change_24h {
+            prompt.push_str(&format!("• Price Change 24h: {:.2}%\n", change));
+        }
+        
+        if let Some(rsi) = data.rsi_14 {
+            prompt.push_str(&format!("• RSI (14): {:.2}\n", rsi));
+        }
+        
+        if let Some(ma50) = data.ma_50 {
+            prompt.push_str(&format!("• 50 MA: ${:.2}\n", ma50));
+        }
+        
+        if let Some(ma200) = data.ma_200 {
+            prompt.push_str(&format!("• 200 MA: ${:.2}\n", ma200));
+        }
+        
+        if let Some((macd, signal, hist)) = data.macd {
+            prompt.push_str(&format!("• MACD: {:.2}/{:.2}/{:.2}\n", macd, signal, hist));
+        }
+        
+        if let Some((upper, middle, lower)) = data.bollinger_bands {
+            prompt.push_str(&format!("• Bollinger Bands: {:.2}/{:.2}/{:.2}\n", upper, middle, lower));
+        }
+        
+        if let Some(volume) = data.volume_24h {
+            prompt.push_str(&format!("• Volume 24h: ${:.2}B\n", volume / 1e9));
+        }
+    }
+
+    fn extract_market_outlook(&self, response: &str) -> String {
+        let response_lower = response.to_lowercase();
+        
+        // Check confidence levels
+        if let Some(start) = response_lower.find("bullish scenario") {
+            if let Some(end) = response_lower[start..].find("%") {
+                let confidence_text = &response_lower[start..start+end];
+                if let Some(confidence) = confidence_text.split(":").nth(1) {
+                    if let Ok(confidence_num) = confidence.trim().parse::<f64>() {
+                        if confidence_num > 50.0 {
+                            return "Bullish".to_string();
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Check for explicit bearish signals
+        if response_lower.contains("strong bearish phase") 
+            || response_lower.contains("bearish momentum")
+            || (response_lower.contains("bearish scenario") && response_lower.contains("65%")) {
+            return "Bearish".to_string();
+        }
+        
+        "Neutral".to_string()
+    }
+
+    fn extract_risk_level(&self, _response: &str) -> String {
+        // TODO: Implement proper risk level extraction
+        String::from("Medium")
+    }
+
+    /// Analyzes a specific sector with volume and dominance metrics
+    /// # Arguments
+    /// * `name` - Sector name (e.g. "AI Sector")
+    /// * `volume` - 24h volume in USD
+    /// * `dominance` - Market dominance percentage
+    /// * `coins` - List of key coins in the sector
+    pub fn analyze_sector(
+        &self, 
+        name: &str, 
+        volume: f64, 
+        dominance: f64, 
+        coins: &[&str]
+    ) -> String {
+        format!(
+            "\n🔍 {} Sector Analysis:\n\
+             • 24h Volume: ${:.2}B\n\
+             • Market Dominance: {:.2}%\n\
+             • Key Assets: {}\n\
+             • Volume Trend: {}",
+            name,
+            volume / 1e9,
+            dominance,
+            coins.join(", "),
+            self.determine_volume_trend(volume)
+        )
+    }
+
+    /// Determines volume trend based on current volume
+    /// # Arguments
+    /// * `current_volume` - Current 24h volume in USD
+    pub fn determine_volume_trend(&self, current_volume: f64) -> &str {
+        // Simple volume trend analysis
+        match current_volume {
+            v if v > 5_000_000_000.0 => "Very High 🔥",
+            v if v > 1_000_000_000.0 => "High 📈",
+            v if v > 500_000_000.0 => "Moderate ↔️",
+            _ => "Low 📉"
+        }
+    }
+
+    fn format_technical_overview(&self, data: &MarketTechnicalData, days: u32) -> String {
+        format!(
+            "BTC: ${:.2}\nETH: ${:.2}\nTotal Market Cap: ${:.2}B\nAnalysis Period: {} days",
+            data.btc_data.current_price.unwrap_or(0.0),
+            data.eth_data.current_price.unwrap_or(0.0),
+            data.global_metrics.total_market_cap / 1e9,
+            days
+        )
+    }
 }
 
 #[async_trait]
@@ -440,18 +704,28 @@ impl Agent for TechnicalAgent {
         &self.base.model
     }
     
-    async fn think(&mut self, market_data: &MarketData, previous_message: Option<String>) -> Result<String> {
-        // Create context from market data
-        let context = serde_json::to_string_pretty(market_data)?;
+    async fn think(
+        &mut self,
+        market_data: &MarketData,
+        previous_message: Option<String>
+    ) -> Result<String> {
+        let client = CoinGeckoClient::new()?;
+        let technical_data = client.get_technical_analysis().await?;
         
-        let prompt = "Analyze the current market conditions from a technical analysis perspective.";
+        let days = 14u32;
+        let context = serde_json::to_string_pretty(&technical_data)?;
         
-        let response = self.base.generate_response(prompt, Some(&context)).await?;
+        let prompt = format!(
+            "Analyze these market conditions:\n{}",
+            self.format_technical_overview(&technical_data, days)
+        );
+
+        let response = self.base.generate_response(&prompt, Some(&context)).await?;
         
-        // Save to memory
         self.base.memory.conversations.push(Conversation {
             timestamp: Utc::now(),
             market_data: market_data.clone(),
+            technical_data: Some(technical_data),
             other_message: previous_message,
             response: response.clone(),
         });

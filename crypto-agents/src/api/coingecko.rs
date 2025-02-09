@@ -7,10 +7,60 @@ use tokio::time::Duration;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter};
 use std::path::Path;
+use std::collections::HashMap;
+use std::time::Instant;
 
 const BASE_URL: &str = "https://api.coingecko.com/api/v3";
-const BASE_DELAY: u64 = 6;  // Base delay in seconds
-const REQUEST_DELAY: u64 = 6;     // Delay between requests
+const BASE_DELAY: u64 = 3;  // Increase base delay to 3 seconds
+const REQUEST_DELAY: u64 = 3;     // Delay between requests
+const MAX_RETRIES: u32 = 2;
+const DEMO_API_KEY: &str = "CG-mVrwoy4JYveQ5MvX2Z2jbsyn";
+
+// Add this attribute to hide dead code warnings
+#[allow(dead_code)]
+const CATEGORY_AI: &[&str] = &[
+    "ai-and-big-data",     // Main AI category
+    "ai-agents",           // AI Agents specific
+    "chatbot",             // AI chat/bot tokens
+    "machine-learning"     // ML specific tokens
+];
+
+#[allow(dead_code)]
+const CATEGORY_LAYER1: &[&str] = &[
+    "smart-contract-platform",  // Main L1 category
+    "cosmos-ecosystem",
+    "ethereum-ecosystem",
+    "solana-ecosystem",
+    "avalanche-ecosystem",
+    "polkadot-ecosystem"
+];
+
+#[allow(dead_code)]
+const CATEGORY_LAYER2: &[&str] = &[
+    "layer-2",             // Main L2 category
+    "scaling",             // Scaling solutions
+    "optimistic-rollups",  // Optimistic rollups
+    "zk-rollups"          // ZK rollups
+];
+
+#[allow(dead_code)]
+const CATEGORY_DEFI: &[&str] = &[
+    "decentralized-finance-defi",
+    "yield-farming",
+    "decentralized-exchange",
+    "lending-borrowing",
+    "synthetic-issuer",
+    "liquid-staking-derivatives",
+    "automated-market-maker-amm"
+];
+
+// Keep only the coin list constants that we use
+#[allow(dead_code)]
+const AI_COINS: &str = "fetch-ai,singularitynet,ocean-protocol,numeraire,oasis-network,graphlinq-protocol,matrix-ai-network,injective,render-token,akash-network,bittensor,cortex,vectorspace,aleph-zero";
+#[allow(dead_code)]
+const LAYER1_COINS: &str = "ethereum,bitcoin,solana,cardano,avalanche-2,cosmos,polkadot,near,tron,stellar,algorand,internet-computer,flow,tezos,hedera-hashgraph,elrond-erd-2,waves,neo,zilliqa";
+#[allow(dead_code)]
+const LAYER2_COINS: &str = "polygon,optimism,arbitrum,immutable-x,loopring,zkspace,starknet,metis-token,boba-network,zksync-era,mantle,base,linea,scroll";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -32,6 +82,10 @@ pub struct DetailedCoinData {
     pub price_change_7d: Option<f64>,
     #[serde(default, rename = "price_change_percentage_30d_in_currency")]
     pub price_change_30d: Option<f64>,
+    #[serde(skip)]
+    pub ma_50: Option<f64>,
+    #[serde(skip)]
+    pub ma_200: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,8 +106,9 @@ pub struct TechnicalData {
     pub ma_200: Option<f64>,
     pub macd: Option<(f64, f64, f64)>, // (MACD, Signal, Histogram)
     pub bollinger_bands: Option<(f64, f64, f64)>, // (Upper, Middle, Lower)
-    pub stochastic_rsi: Option<f64>,
-    pub volume_sma: Option<f64>,
+    pub volume_24h: Option<f64>,
+    pub current_price: Option<f64>,     // Added current price
+    pub price_change_24h: Option<f64>,  // Added 24h price change
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,12 +138,50 @@ pub struct GlobalTechnicalMetrics {
     pub ai_sector_growth: f64,       // AI sector 24h change
     pub cross_chain_volume: f64,     // Bridge volume
     pub dex_volume_share: f64,       // DEX vs CEX ratio
+    pub rwa_sector_dominance: f64,    // Add RWA sector dominance
+    pub rwa_sector_volume: f64,       // Add RWA volume
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CategoryData {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub market_cap: Option<f64>,
+    #[serde(default)]
+    pub market_cap_change_24h: Option<f64>,
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub top_3_coins_id: Vec<String>,
+    #[serde(default)]
+    pub top_3_coins: Vec<String>,
+    #[serde(default)]
+    pub volume_24h: Option<f64>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
+// Add new struct for category list
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CategoryListItem {
+    pub category_id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HistoricalData {
+    pub prices: Vec<[f64; 2]>,        // [timestamp, price]
+    pub market_caps: Vec<[f64; 2]>,   // [timestamp, market_cap]
+    pub total_volumes: Vec<[f64; 2]>, // [timestamp, volume]
 }
 
 pub struct CoinGeckoClient {
     client: Client,
     processed_coins: std::collections::HashSet<String>,
     processed_coins_file: String,
+    cache: HashMap<String, (TechnicalData, Instant)>,
+    cache_duration: Duration,
 }
 
 impl CoinGeckoClient {
@@ -105,6 +198,8 @@ impl CoinGeckoClient {
                 .build()?,
             processed_coins,
             processed_coins_file,
+            cache: HashMap::new(),
+            cache_duration: Duration::from_secs(300), // 5 minute cache
         })
     }
     
@@ -134,54 +229,79 @@ impl CoinGeckoClient {
     async fn make_request(&self, url: &str, params: &[(&str, &str)]) -> Result<Value> {
         let mut delay = BASE_DELAY;
         let mut retries = 0;
-        const MAX_RETRIES: u32 = 5;
         
         loop {
             println!("🌐 Making request to: {}", url);
             
-            let response = self.client
+            // Add demo API key to query parameters
+            let mut all_params = Vec::from(params);
+            all_params.push(("x_cg_demo_api_key", DEMO_API_KEY));
+            
+            let response = tokio::time::timeout(
+                Duration::from_secs(15),
+                self.client
                 .get(url)
-                .query(params)
-                .header("Accept", "application/json")
+                    .query(&all_params)
+                    .header("accept", "application/json")
                 .send()
-                .await
-                .context("Failed to send request")?;
+            ).await;
+
+            match response {
+                Ok(res) => match res {
+                    Ok(r) => {
+                        // Add delay between requests
+                        tokio::time::sleep(Duration::from_secs(6)).await;
+                        
+                        if r.status() == 429 {
+                            println!("⚠️ Rate limited, waiting {} seconds...", delay);
+                            tokio::time::sleep(Duration::from_secs(delay)).await;
+                            delay *= 2;
+                            if retries >= MAX_RETRIES {
+                                return Err(anyhow::anyhow!("Rate limit exceeded after {} retries", MAX_RETRIES));
+                            }
+                            retries += 1;
+                            continue;
+                        }
+                        
+                        if r.status().is_success() {
+                            let text = r.text().await
+            .context("Failed to get response text")?;
             
-            // Check rate limits and adjust delay
-            if let Some(remaining) = response.headers()
-                .get("x-ratelimit-remaining")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u32>().ok()) 
-            {
-                delay = match remaining {
-                    0..=5 => BASE_DELAY * 4,
-                    6..=10 => BASE_DELAY * 2,
-                    11..=20 => BASE_DELAY,
-                    _ => BASE_DELAY / 2,
-                };
-            }
-            
-            if response.status() == 429 {
-                if retries >= MAX_RETRIES {
-                    return Err(anyhow::anyhow!("Max retries exceeded"));
+                            return serde_json::from_str(&text)
+                                .with_context(|| format!("Failed to parse JSON response: {}", text));
+                        }
+                        
+                        println!("⚠️ Request failed with status: {}", r.status());
+                        if retries >= MAX_RETRIES {
+                            return Err(anyhow::anyhow!("Request failed with status: {}", r.status()));
+                        }
+                        retries += 1;
+                        tokio::time::sleep(Duration::from_secs(delay)).await;
+                        delay *= 2;
+                        continue;
+                    }
+                    Err(e) => {
+                        println!("⚠️ Request error: {}", e);
+                        if retries >= MAX_RETRIES {
+                            return Err(anyhow::anyhow!("Request failed: {}", e));
+                        }
+                        retries += 1;
+                        tokio::time::sleep(Duration::from_secs(delay)).await;
+                        delay *= 2;
+                        continue;
+                    }
+                },
+                Err(_) => {
+                    println!("⚠️ Request timed out");
+                    if retries >= MAX_RETRIES {
+                        return Err(anyhow::anyhow!("Request timed out after {} retries", MAX_RETRIES));
+                    }
+                    retries += 1;
+                    tokio::time::sleep(Duration::from_secs(delay)).await;
+                    delay *= 2;
+                    continue;
                 }
-                println!("⚠️ Rate limited, waiting {} seconds...", delay);
-                tokio::time::sleep(Duration::from_secs(delay)).await;
-                delay *= 2;
-                retries += 1;
-                continue;
             }
-            
-            // Process response
-            if response.status().is_success() {
-                let text = response.text().await
-                    .context("Failed to get response text")?;
-                
-                return serde_json::from_str(&text)
-                    .with_context(|| format!("Failed to parse JSON response: {}", text));
-            }
-            
-            return Err(anyhow::anyhow!("Request failed: {}", response.status()));
         }
     }
     
@@ -193,11 +313,10 @@ impl CoinGeckoClient {
             .await?
             .json()
             .await?;
-
-        // The data is nested under "data" in the response
+            
         let data = response.get("data")
             .ok_or_else(|| AgentError::InvalidData("No data field in global response".to_string()))?;
-
+            
         Ok(GlobalData {
             total_market_cap: data.get("total_market_cap")
                 .and_then(|v| v.get("usd"))
@@ -269,25 +388,20 @@ impl CoinGeckoClient {
     }
     
     pub async fn get_market_data(&self) -> Result<MarketData> {
-        // Get global data
         let global_data = self.get_global_data().await?;
         
-        // Debug print
         println!("Debug: Global Market Data");
         println!("Market Cap: ${:.2}B", global_data.total_market_cap / 1_000_000_000.0);
         println!("Volume: ${:.2}B", global_data.total_volume / 1_000_000_000.0);
         println!("Active Coins: {}", global_data.active_cryptocurrencies);
         println!("24h Change: {:.2}%", global_data.market_cap_change_percentage_24h);
 
-        // Get Bitcoin data
         let btc_data = self.get_detailed_coin_data("bitcoin").await?;
         
-        // Get Ethereum data
         let eth_data = self.get_detailed_coin_data("ethereum").await?;
         
-        // Get trending coins
         let trending = self.get_trending_coins().await?;
-
+        
         Ok(MarketData {
             overview: global_data,
             trending,
@@ -318,13 +432,12 @@ impl CoinGeckoClient {
             ("order", "volume_desc"),
             ("per_page", "250"),
             ("sparkline", "false"),
-            ("price_change_percentage", "1h,24h")  // Keep both 1h and 24h for reference
+            ("price_change_percentage", "1h,24h")
         ];
         
         println!("📊 Fetching potential top gainers...");
         let data = self.make_request(&url, &params).await?;
         
-        // First deserialize as Value to check the structure
         let coins_value: Value = serde_json::from_value(data.clone())
             .context("Failed to parse response as JSON Value")?;
             
@@ -336,36 +449,29 @@ impl CoinGeckoClient {
         let all_coins: Vec<DetailedCoinData> = serde_json::from_value(data)
             .context("Failed to parse top gainers response")?;
             
-        // Filter for significant gains and sort by combined performance
         let mut filtered_coins: Vec<DetailedCoinData> = all_coins.into_iter()
             .filter(|coin| {
-                // Filter out stablecoins and low volatility coins
                 !coin.symbol.to_lowercase().contains("usd") && 
                 !coin.symbol.to_lowercase().contains("usdt") &&
                 !coin.symbol.to_lowercase().contains("usdc") &&
                 !coin.symbol.to_lowercase().contains("dai") &&
                 !coin.symbol.to_lowercase().contains("busd") &&
-                // Ensure we have valid price data
                 coin.current_price > 0.0 &&
-                coin.volume_24h > 100000.0 &&  // Ensure decent liquidity
-                // Check if we have valid price change data and >3% gains in 1h
+                coin.volume_24h > 100000.0 &&
                 coin.price_change_1h.unwrap_or_default() > 3.0
             })
             .collect();
             
-        // Sort by 1h performance
         filtered_coins.sort_by(|a, b| {
             let a_score = a.price_change_1h.unwrap_or_default();
             let b_score = b.price_change_1h.unwrap_or_default();
             b_score.partial_cmp(&a_score).unwrap_or(std::cmp::Ordering::Equal)
         });
         
-        // Take top 20
         let top_coins = filtered_coins.into_iter().take(20).collect::<Vec<_>>();
             
         println!("✅ Found {} coins with >3% gains in 1h", top_coins.len());
         
-        // Print detailed gains for monitoring
         for coin in &top_coins {
             println!("🚀 {}: 1h: {:.2}%, Vol: ${:.2}M", 
                 coin.symbol.to_uppercase(), 
@@ -383,14 +489,12 @@ impl CoinGeckoClient {
             ("include_platform", "false")
         ];
         
-        println!("🆕 Fetching new coins list...");
+        println!("📝 Fetching new coins list...");
         let data = self.make_request(&url, &params).await?;
         
-        // Get list of all coins first
         let all_coins: Vec<Value> = serde_json::from_value(data)
             .context("Failed to parse coins list")?;
             
-        // Filter out coins we've already processed
         let new_coins = all_coins.into_iter()
             .filter(|coin| {
                 let id = coin["id"].as_str().unwrap_or_default();
@@ -408,11 +512,9 @@ impl CoinGeckoClient {
         
         let mut detailed_coins = Vec::new();
         
-        // Get detailed data for each new coin
         for coin in new_coins {
             let id = coin["id"].as_str().unwrap_or_default();
             
-            // Skip if we've already processed this coin (double check)
             if self.processed_coins.contains(id) {
                 println!("⏩ Skipping already processed coin: {}", id);
                 continue;
@@ -420,7 +522,6 @@ impl CoinGeckoClient {
             
             match self.get_detailed_coin_data(id).await {
                 Ok(coin_data) => {
-                    // Only add non-stablecoins with valid data
                     if !coin_data.symbol.to_lowercase().contains("usd") && 
                        !coin_data.name.is_empty() &&
                        !coin_data.symbol.is_empty() {
@@ -430,9 +531,7 @@ impl CoinGeckoClient {
                             coin_data.current_price
                         );
                         detailed_coins.push(coin_data);
-                        // Add to processed coins set
                         self.processed_coins.insert(id.to_string());
-                        // Save after each successful addition
                         if let Err(e) = self.save_processed_coins() {
                             println!("⚠️ Failed to save processed coins: {}", e);
                         }
@@ -446,13 +545,11 @@ impl CoinGeckoClient {
                 }
             }
             
-            // Add delay between requests to avoid rate limiting
             tokio::time::sleep(Duration::from_secs(REQUEST_DELAY)).await;
         }
         
         println!("✅ Successfully processed {} new unique coins", detailed_coins.len());
         
-        // Final save of processed coins
         if let Err(e) = self.save_processed_coins() {
             println!("⚠️ Failed to save processed coins: {}", e);
         }
@@ -460,7 +557,7 @@ impl CoinGeckoClient {
         Ok(detailed_coins)
     }
     
-    pub async fn get_detailed_coin_data(&self, coin_id: &str) -> Result<DetailedCoinData> {
+    async fn get_coin_market_data(&self, coin_id: &str) -> Result<DetailedCoinData> {
         let url = format!("{}/coins/markets", BASE_URL);
         let params = [
             ("vs_currency", "usd"),
@@ -472,17 +569,37 @@ impl CoinGeckoClient {
             ("price_change_percentage", "1h,24h,7d,30d")
         ];
         
-        println!("🔍 Fetching details for coin {}...", coin_id);
         let data = self.make_request(&url, &params).await?;
         let coins: Vec<DetailedCoinData> = serde_json::from_value(data)?;
         let coin_data = coins.into_iter().next()
             .ok_or_else(|| anyhow::anyhow!("No data found"))?;
-            
+        
+        Ok(coin_data)
+    }
+
+    pub async fn get_detailed_coin_data(&self, coin_id: &str) -> Result<DetailedCoinData> {
+        println!("🔍 Fetching details for coin {}...", coin_id);
+        
+        // Get basic market data
+        let mut coin_data = self.get_coin_market_data(coin_id).await?;
+        
+        // Get historical data for MAs
+        let historical = self.get_historical_data(coin_id, 200).await?;
+        
+        println!("📊 Calculating Moving Averages...");
+        println!("Historical data points: {}", historical.prices.len());
+        
+        // Calculate MAs
+        coin_data.ma_50 = self.calculate_ma_from_prices(&historical.prices, 50);
+        coin_data.ma_200 = self.calculate_ma_from_prices(&historical.prices, 200);
+        
+        println!("MA50: ${:.2}", coin_data.ma_50.unwrap_or_default());
+        println!("MA200: ${:.2}", coin_data.ma_200.unwrap_or_default());
+        
         println!("✅ Successfully fetched details for {}", coin_id);
         Ok(coin_data)
     }
 
-    // Get OHLCV candle data
     pub async fn get_candle_data(&self, coin_id: &str, days: u16) -> Result<Vec<CandleData>> {
         let url = format!("{}/coins/{}/ohlc", BASE_URL, coin_id);
         let params = [
@@ -493,7 +610,6 @@ impl CoinGeckoClient {
         println!("📊 Fetching candle data for {} over {} days", coin_id, days);
         let data = self.make_request(&url, &params).await?;
 
-        // CoinGecko returns array of arrays: [timestamp, open, high, low, close]
         let candles: Vec<Vec<f64>> = serde_json::from_value(data)?;
 
         let candle_data = candles.into_iter()
@@ -503,135 +619,162 @@ impl CoinGeckoClient {
                 high: candle[2],
                 low: candle[3],
                 close: candle[4],
-                volume: candle[5],
+                volume: 0.0, // OHLC endpoint doesn't provide volume data
             })
             .collect();
 
         Ok(candle_data)
     }
 
-    // Modify get_market_chart to work with free tier
-    pub async fn get_market_chart(&self, coin_id: &str, days: u16) -> Result<TechnicalData> {
+    #[allow(dead_code)]
+    async fn get_market_chart_fallback(&self, coin_id: &str, days: u16) -> Result<Vec<CandleData>> {
         let url = format!("{}/coins/{}/market_chart", BASE_URL, coin_id);
         let params = [
             ("vs_currency", "usd"),
             ("days", &days.to_string()),
-            // Remove the interval parameter as it's not needed for free tier
+            ("interval", "daily"),
         ];
 
-        println!("📈 Fetching market chart for {}", coin_id);
-        let data = match self.make_request(&url, &params).await {
-            Ok(data) => data,
-            Err(e) => {
-                println!("❌ Failed to fetch market chart: {}", e);
-                return Err(e);
-            }
-        };
+        println!("📊 Using market_chart fallback for volume data...");
+        let data = self.make_request(&url, &params).await?;
 
-        // Debug print the raw response
-        println!("🔍 Raw market chart data received");
+        let _prices: Vec<Vec<f64>> = serde_json::from_value(data["prices"].clone())?;
+        let volumes: Vec<Vec<f64>> = serde_json::from_value(data["total_volumes"].clone())?;
 
-        // Extract price and volume data with error handling
-        let prices: Vec<Vec<f64>> = match serde_json::from_value(data["prices"].clone()) {
-            Ok(p) => p,
-            Err(e) => {
-                println!("❌ Failed to parse prices: {}", e);
-                return Err(anyhow::anyhow!("Failed to parse prices"));
-            }
-        };
-
-        let volumes: Vec<Vec<f64>> = match serde_json::from_value(data["total_volumes"].clone()) {
-            Ok(v) => v,
-            Err(e) => {
-                println!("❌ Failed to parse volumes: {}", e);
-                return Err(anyhow::anyhow!("Failed to parse volumes"));
-            }
-        };
-
-        println!("✅ Successfully parsed {} price points and {} volume points", 
-            prices.len(), volumes.len());
-
-        // Combine into candles (daily)
-        let mut candles = Vec::new();
-        let points_per_day = prices.len() as f64 / days as f64;
+        let mut candles = self.get_ohlc_data(coin_id, days.into()).await?;
         
-        for chunk_start in (0..prices.len()).step_by(points_per_day.round() as usize) {
-            let chunk_end = (chunk_start + points_per_day.round() as usize).min(prices.len());
-            let day_prices = &prices[chunk_start..chunk_end];
-            let day_volumes = &volumes[chunk_start..chunk_end];
-
-            if !day_prices.is_empty() {
-                let high = day_prices.iter().map(|p| p[1]).fold(f64::NEG_INFINITY, f64::max);
-                let low = day_prices.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min);
-                let open = day_prices.first().unwrap()[1];
-                let close = day_prices.last().unwrap()[1];
-                let volume = day_volumes.iter().map(|v| v[1]).sum();
-
-                let candle = CandleData {
-                    timestamp: day_prices[0][0] as i64,
-                    open,
-                    high,
-                    low,
-                    close,
-                    volume,
-                };
-                candles.push(candle);
+        for (i, candle) in candles.iter_mut().enumerate() {
+            if i < volumes.len() {
+                candle.volume = volumes[i][1];
             }
         }
 
-        println!("📊 Generated {} daily candles", candles.len());
+        Ok(candles)
+    }
 
-        // Calculate all technical indicators
+    pub async fn get_market_chart(&self, coin_id: &str, days: u32) -> Result<TechnicalData> {
+        println!("📈 Fetching market data for {}", coin_id);
+        
+        // Get OHLC data
+        let candles = self.get_ohlc_data(coin_id, days.into()).await?;
+        
+        if candles.is_empty() {
+            return Err(anyhow::anyhow!("No OHLC data available"));
+        }
+
+        // Get price and volume data from simple/price endpoint
+        let price_url = format!("{}/simple/price", BASE_URL);
+        let price_params = [
+            ("ids", coin_id),
+            ("vs_currencies", "usd"),
+            ("include_market_cap", "true"),
+            ("include_24hr_vol", "true"),
+            ("include_24hr_change", "true"),
+            ("include_last_updated_at", "true"),
+            ("precision", "2")
+        ];
+
+        let price_data = self.make_request(&price_url, &price_params).await?;
+        let volume_24h = price_data[coin_id]["usd_24h_vol"]
+            .as_f64()
+            .unwrap_or(0.0);
+        let current_price = price_data[coin_id]["usd"]
+            .as_f64()
+            .unwrap_or(0.0);
+        let price_change_24h = price_data[coin_id]["usd_24h_change"]
+            .as_f64()
+            .unwrap_or(0.0);
+        
+        // Calculate indicators
         let rsi_14 = self.calculate_rsi(&candles, 14);
-        let ma_50 = self.calculate_ma(&candles, 50);
-        let ma_200 = self.calculate_ma(&candles, 200);
+        let ma_50 = self.calculate_ma_from_candles(&candles, 50);
+        let ma_200 = self.calculate_ma_from_candles(&candles, 200);
         let macd = self.calculate_macd(&candles);
-        let bollinger_bands = self.calculate_bollinger_bands(&candles, 20); // 20-day BB
-        let stochastic_rsi = self.calculate_stochastic_rsi(&candles, 14);
-        let volume_sma = self.calculate_volume_sma(&candles, 20); // 20-day Volume SMA
-
+        let bb = self.calculate_bollinger_bands(&candles);
+        
         println!("📈 Calculated indicators:");
+        println!("  • Current Price: ${:.2}", current_price);
+        println!("  • Price Change 24h: {:.2}%", price_change_24h);
         println!("  • RSI (14): {:.2}", rsi_14);
-        println!("  • 50 MA: ${:.2}", ma_50);
-        println!("  • 200 MA: ${:.2}", ma_200);
-        println!("  • MACD: {:.2}/{:.2}/{:.2}", macd.0, macd.1, macd.2);
-        println!("  • Bollinger Bands: {:.2}/{:.2}/{:.2}", bollinger_bands.0, bollinger_bands.1, bollinger_bands.2);
-        println!("  • Stochastic RSI: {:.2}", stochastic_rsi);
-        println!("  • Volume SMA: ${:.2}", volume_sma);
-
+        println!("  • 50 MA: ${:.2}", ma_50.unwrap_or_default());
+        println!("  • 200 MA: ${:.2}", ma_200.unwrap_or_default());
+        
+        if let Some((macd_val, signal, hist)) = macd {
+            println!("  • MACD: {:.2}/{:.2}/{:.2}", macd_val, signal, hist);
+        }
+        
+        if let Some((upper, middle, lower)) = bb {
+            println!("  • Bollinger Bands: {:.2}/{:.2}/{:.2}", upper, middle, lower);
+        }
+        
+        println!("  • Volume 24h: ${:.2}B", volume_24h / 1e9);
+        
         Ok(TechnicalData {
             candles,
             rsi_14: Some(rsi_14),
-            ma_50: Some(ma_50),
-            ma_200: Some(ma_200),
-            macd: Some(macd),
-            bollinger_bands: Some(bollinger_bands),
-            stochastic_rsi: Some(stochastic_rsi),
-            volume_sma: Some(volume_sma),
+            ma_50: ma_50,
+            ma_200: ma_200,
+            macd,
+            bollinger_bands: bb,
+            volume_24h: Some(volume_24h),
+            current_price: Some(current_price),
+            price_change_24h: Some(price_change_24h),
         })
     }
 
-    // Calculate RSI
+    pub async fn get_ohlc_data(&self, coin_id: &str, days: u32) -> Result<Vec<CandleData>> {
+        let url = format!("{}/coins/{}/ohlc", BASE_URL, coin_id);
+        let params = [("vs_currency", "usd"), ("days", &days.to_string())];
+        
+        println!("📊 Fetching OHLC data...");
+        let data = self.make_request(&url, &params).await?;
+        
+        // Parse OHLC data
+        let candles = data.as_array()
+            .context("Invalid OHLC data format")?
+            .iter()
+            .map(|v| {
+                let parts = v.as_array().context("Invalid candle format")?;
+                Ok(CandleData {
+                    timestamp: parts[0].as_i64().context("Invalid timestamp")?,
+                    open: parts[1].as_f64().context("Invalid open price")?,
+                    high: parts[2].as_f64().context("Invalid high price")?,
+                    low: parts[3].as_f64().context("Invalid low price")?,
+                    close: parts[4].as_f64().context("Invalid close price")?,
+                    volume: 0.0, // OHLC endpoint doesn't provide volume data
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(candles)
+    }
+
     fn calculate_rsi(&self, candles: &[CandleData], period: usize) -> f64 {
         if candles.len() < period + 1 {
-            return 50.0; // Default value if not enough data
+            return 50.0;
         }
 
-        let mut gains = 0.0;
-        let mut losses = 0.0;
+        let mut gains = Vec::new();
+        let mut losses = Vec::new();
 
-        // Calculate initial gains/losses
-        for i in 1..=period {
-            let diff = candles[i].close - candles[i-1].close;
-            if diff > 0.0 {
-                gains += diff;
+        for i in 1..candles.len() {
+            let change = candles[i].close - candles[i-1].close;
+            if change > 0.0 {
+                gains.push(change);
+                losses.push(0.0);
             } else {
-                losses -= diff;
+                gains.push(0.0);
+                losses.push(change.abs());
             }
         }
 
-        let avg_gain = gains / period as f64;
-        let avg_loss = losses / period as f64;
+        let mut avg_gain = gains.iter().take(period).sum::<f64>() / period as f64;
+        let mut avg_loss = losses.iter().take(period).sum::<f64>() / period as f64;
+
+        for i in period..gains.len() {
+            avg_gain = (avg_gain * (period - 1) as f64 + gains[i]) / period as f64;
+            avg_loss = (avg_loss * (period - 1) as f64 + losses[i]) / period as f64;
+        }
 
         if avg_loss == 0.0 {
             return 100.0;
@@ -641,127 +784,96 @@ impl CoinGeckoClient {
         100.0 - (100.0 / (1.0 + rs))
     }
 
-    // Calculate Moving Average
-    fn calculate_ma(&self, candles: &[CandleData], period: usize) -> f64 {
+    fn calculate_ma_from_candles(&self, candles: &[CandleData], period: usize) -> Option<f64> {
         if candles.len() < period {
-            return candles.last().map(|c| c.close).unwrap_or_default();
+            return None;
         }
 
-        let sum: f64 = candles.iter()
-            .rev()
-            .take(period)
-            .map(|c| c.close)
-            .sum();
-
-        sum / period as f64
+        let prices: Vec<f64> = candles.iter().map(|c| c.close).collect();
+        let start_idx = prices.len().saturating_sub(period);
+        let sum: f64 = prices[start_idx..].iter().sum();
+        Some(sum / period as f64)
     }
 
-    // Calculate MACD
-    fn calculate_macd(&self, candles: &[CandleData]) -> (f64, f64, f64) {
-        let prices: Vec<f64> = candles.iter().map(|c| c.close).collect();
+    fn calculate_ma_from_prices(&self, prices: &[[f64; 2]], period: usize) -> Option<f64> {
+        if prices.len() < period {
+            println!("⚠️ Not enough data points for MA{}: {} < {}", period, prices.len(), period);
+            return None;
+        }
         
-        // Calculate EMAs for the entire price series
-        let fast_ema = self.calculate_ema_series(&prices, 12);
-        let slow_ema = self.calculate_ema_series(&prices, 26);
-        
-        // Calculate MACD line
-        let macd_line: Vec<f64> = fast_ema.iter()
-            .zip(slow_ema.iter())
-            .map(|(f, s)| f - s)
+        let recent_prices: Vec<f64> = prices.iter()
+            .rev() // Get most recent first
+            .take(period)
+            .map(|p| p[1]) // Get price value
             .collect();
         
-        // Calculate signal line from MACD values
-        let signal_line = self.calculate_ema_series(&macd_line, 9);
-        
-        // Get latest values
-        let latest_macd = *macd_line.last().unwrap_or(&0.0);
-        let latest_signal = *signal_line.last().unwrap_or(&0.0);
-        let histogram = latest_macd - latest_signal;
-        
-        (latest_macd, latest_signal, histogram)
+        let sum: f64 = recent_prices.iter().sum();
+        let ma = Some(sum / period as f64);
+        println!("Calculated MA{}: ${:.2}", period, ma.unwrap_or_default());
+        ma
     }
 
-    fn calculate_bollinger_bands(&self, candles: &[CandleData], period: usize) -> (f64, f64, f64) {
-        let sma = self.calculate_ma(candles, period);
+    fn calculate_macd(&self, candles: &[CandleData]) -> Option<(f64, f64, f64)> {
+        if candles.len() < 26 {
+            return None;
+        }
+
+        let prices: Vec<f64> = candles.iter().map(|c| c.close).collect();
         
-        // Calculate standard deviation
+        let mut fast_ema = prices[0];
+        let mut slow_ema = prices[0];
+        let mut signal = 0.0;
+        
+        let fast_alpha = 2.0 / (12.0 + 1.0);
+        let slow_alpha = 2.0 / (26.0 + 1.0);
+        let signal_alpha = 2.0 / (9.0 + 1.0);
+        
+        let mut macd_values = Vec::new();
+        
+        for price in prices.iter() {
+            fast_ema = price * fast_alpha + fast_ema * (1.0 - fast_alpha);
+            slow_ema = price * slow_alpha + slow_ema * (1.0 - slow_alpha);
+            let macd = fast_ema - slow_ema;
+            macd_values.push(macd);
+        }
+        
+        if !macd_values.is_empty() {
+            signal = macd_values[0];
+            for macd in macd_values.iter().skip(1) {
+                signal = macd * signal_alpha + signal * (1.0 - signal_alpha);
+            }
+        }
+        
+        let latest_macd = *macd_values.last().unwrap_or(&0.0);
+        let histogram = latest_macd - signal;
+        
+        Some((latest_macd, signal, histogram))
+    }
+
+    fn calculate_bollinger_bands(&self, candles: &[CandleData]) -> Option<(f64, f64, f64)> {
+        let sma = self.calculate_ma_from_candles(candles, 20);
+        
         let variance: f64 = candles.iter()
             .rev()
-            .take(period)
+            .take(20)
             .map(|c| {
-                let diff = c.close - sma;
+                let diff = c.close - sma.unwrap_or_default();
                 diff * diff
             })
-            .sum::<f64>() / period as f64;
+            .sum::<f64>() / 20.0;
         
         let std_dev = variance.sqrt();
         
-        // Upper and lower bands (2 standard deviations)
-        let upper_band = sma + (2.0 * std_dev);
-        let lower_band = sma - (2.0 * std_dev);
+        let upper_band = sma.unwrap_or_default() + (2.0 * std_dev);
+        let lower_band = sma.unwrap_or_default() - (2.0 * std_dev);
 
-        (upper_band, sma, lower_band)
-    }
-
-    fn calculate_stochastic_rsi(&self, candles: &[CandleData], period: usize) -> f64 {
-        let rsi_values: Vec<f64> = candles.windows(period + 1)
-            .map(|window| self.calculate_rsi(window, period))
-            .collect();
-
-        if rsi_values.is_empty() {
-            return 50.0;
+        if upper_band.is_infinite() || lower_band.is_infinite() {
+            return None;
         }
 
-        // Explicitly specify f64 for min/max operations
-        let min_rsi = rsi_values.iter()
-            .fold(100.0_f64, |a: f64, &b| a.min(b));
-        let max_rsi = rsi_values.iter()
-            .fold(0.0_f64, |a: f64, &b| a.max(b));
-
-        // Use f64::abs() instead of the abs() method
-        if f64::abs(max_rsi - min_rsi) < f64::EPSILON {
-            return 50.0;
-        }
-
-        // Calculate Stochastic RSI
-        let current_rsi = *rsi_values.last().unwrap();
-        (current_rsi - min_rsi) / (max_rsi - min_rsi) * 100.0
+        Some((upper_band, sma.unwrap_or_default(), lower_band))
     }
 
-    fn calculate_volume_sma(&self, candles: &[CandleData], period: usize) -> f64 {
-        if candles.len() < period {
-            return candles.last().map(|c| c.volume).unwrap_or_default();
-        }
-
-        let sum: f64 = candles.iter()
-            .rev()
-            .take(period)
-            .map(|c| c.volume)
-            .sum();
-
-        sum / period as f64
-    }
-
-    // Helper method for MACD
-    fn calculate_ema_series(&self, prices: &[f64], period: usize) -> Vec<f64> {
-        let mut ema_values = Vec::with_capacity(prices.len());
-        let multiplier = 2.0 / (period as f64 + 1.0);
-        
-        // Initialize with SMA
-        let first_sma = prices.iter().take(period).sum::<f64>() / period as f64;
-        ema_values.push(first_sma);
-        
-        // Calculate EMA for remaining prices
-        for i in period..prices.len() {
-            let previous_ema = ema_values.last().unwrap();
-            let ema = (prices[i] - previous_ema) * multiplier + previous_ema;
-            ema_values.push(ema);
-        }
-        
-        ema_values
-    }
-
-    // Add the missing volume change calculation method
     fn calculate_volume_change(&self, data_sets: &[&TechnicalData]) -> f64 {
         let mut total_change = 0.0;
         let mut valid_sets = 0;
@@ -785,71 +897,132 @@ impl CoinGeckoClient {
         }
     }
 
-    // Update market metrics calculation to use the new volume change method
+    pub async fn get_category_volumes(&self) -> Result<(f64, f64, f64, f64)> {
+        println!("📊 Fetching category data...");
+        
+        // Fetch AI category data
+        let ai_url = format!("{}/coins/categories/artificial-intelligence", BASE_URL);
+        let ai_response = self.client
+            .get(&ai_url)
+            .header("accept", "application/json")
+            .header("x-cg-demo-api-key", DEMO_API_KEY)
+            .send()
+            .await?;
+        
+        let ai_data: CategoryData = serde_json::from_str(&ai_response.text().await?)?;
+        tokio::time::sleep(Duration::from_secs(6)).await;
+
+        // Fetch Layer 1 data
+        let l1_url = format!("{}/coins/categories/layer-1", BASE_URL);
+        let l1_response = self.client
+            .get(&l1_url)
+            .header("accept", "application/json")
+            .header("x-cg-demo-api-key", DEMO_API_KEY)
+            .send()
+            .await?;
+        
+        let l1_data: CategoryData = serde_json::from_str(&l1_response.text().await?)?;
+        tokio::time::sleep(Duration::from_secs(6)).await;
+
+        // Fetch Layer 2 data
+        let l2_url = format!("{}/coins/categories/layer-2", BASE_URL);
+        let l2_response = self.client
+            .get(&l2_url)
+            .header("accept", "application/json")
+            .header("x-cg-demo-api-key", DEMO_API_KEY)
+            .send()
+            .await?;
+        
+        let l2_data: CategoryData = serde_json::from_str(&l2_response.text().await?)?;
+        tokio::time::sleep(Duration::from_secs(6)).await;
+
+        // Fetch RWA data
+        let rwa_url = format!("{}/coins/categories/real-world-assets-rwa", BASE_URL);
+        let rwa_response = self.client
+            .get(&rwa_url)
+            .header("accept", "application/json")
+            .header("x-cg-demo-api-key", DEMO_API_KEY)
+            .send()
+            .await?;
+        
+        let rwa_data: CategoryData = serde_json::from_str(&rwa_response.text().await?)?;
+
+        // Print sector summary
+        println!("\n📊 Sector Analysis:");
+        println!("🤖 AI Sector:");
+        println!("  • Market Cap: ${:.2}B", ai_data.market_cap.unwrap_or(0.0) / 1e9);
+        println!("  • Market Cap Change 24h: {:.2}%", ai_data.market_cap_change_24h.unwrap_or(0.0));
+        println!("  • Volume 24h: ${:.2}B", ai_data.volume_24h.unwrap_or(0.0) / 1e9);
+
+        println!("\n🔗 Layer 1 Sector:");
+        println!("  • Market Cap: ${:.2}B", l1_data.market_cap.unwrap_or(0.0) / 1e9);
+        println!("  • Market Cap Change 24h: {:.2}%", l1_data.market_cap_change_24h.unwrap_or(0.0));
+        println!("  • Volume 24h: ${:.2}B", l1_data.volume_24h.unwrap_or(0.0) / 1e9);
+
+        println!("\n⚡ Layer 2 Sector:");
+        println!("  • Market Cap: ${:.2}B", l2_data.market_cap.unwrap_or(0.0) / 1e9);
+        println!("  • Market Cap Change 24h: {:.2}%", l2_data.market_cap_change_24h.unwrap_or(0.0));
+        println!("  • Volume 24h: ${:.2}B", l2_data.volume_24h.unwrap_or(0.0) / 1e9);
+
+        println!("\n💎 RWA Sector:");
+        println!("  • Market Cap: ${:.2}B", rwa_data.market_cap.unwrap_or(0.0) / 1e9);
+        println!("  • Market Cap Change 24h: {:.2}%", rwa_data.market_cap_change_24h.unwrap_or(0.0));
+        println!("  • Volume 24h: ${:.2}B", rwa_data.volume_24h.unwrap_or(0.0) / 1e9);
+
+        Ok((
+            ai_data.volume_24h.unwrap_or(0.0),
+            l1_data.volume_24h.unwrap_or(0.0),
+            l2_data.volume_24h.unwrap_or(0.0),
+            rwa_data.volume_24h.unwrap_or(0.0)
+        ))
+    }
+
     fn calculate_market_metrics(
         &self,
         global: &GlobalData,
         btc_data: &TechnicalData,
         eth_data: &TechnicalData,
         sol_data: &TechnicalData,
+        _trending_data: &[(String, TechnicalData)],
+        category_volumes: (f64, f64, f64, f64),
     ) -> GlobalTechnicalMetrics {
+        let (ai_volume, l1_volume, l2_volume, rwa_volume) = category_volumes;
         let total_mcap = global.total_market_cap;
-        
-        // Fix market cap calculation
-        let btc_mcap = btc_data.candles.last()
-            .map(|c| c.close)  // Remove volume multiplication
-            .unwrap_or_default();
-            
-        let eth_mcap = eth_data.candles.last()
-            .map(|c| c.close)
-            .unwrap_or_default();
-            
-        let sol_mcap = sol_data.candles.last()
-            .map(|c| c.close)
-            .unwrap_or_default();
-
-        // Calculate dominance correctly
-        let btc_dom = if total_mcap > 0.0 { btc_mcap * 100.0 / total_mcap } else { 0.0 };
-        let eth_dom = if total_mcap > 0.0 { eth_mcap * 100.0 / total_mcap } else { 0.0 };
-        let sol_dom = if total_mcap > 0.0 { sol_mcap * 100.0 / total_mcap } else { 0.0 };
-        
-        // Calculate Layer 1 dominance (BTC + ETH + SOL + other major L1s)
-        let layer1_dom = btc_dom + eth_dom + sol_dom;
-
-        // Calculate volume metrics with all three coins
-        let volume_change = self.calculate_volume_change(&[btc_data, eth_data, sol_data]);
-        
-        // Calculate volatility index
-        let volatility = self.calculate_market_volatility(&[btc_data, eth_data, sol_data]);
 
         GlobalTechnicalMetrics {
             total_market_cap: total_mcap,
-            btc_dominance: btc_dom,
-            eth_dominance: eth_dom,
-            sol_dominance: sol_dom,
+            btc_dominance: (btc_data.candles.last()
+                .map(|c| c.close * 19_000_000.0)
+                .unwrap_or(0.0) / total_mcap) * 100.0,
+            eth_dominance: (eth_data.candles.last()
+                .map(|c| c.close * 120_000_000.0)
+                .unwrap_or(0.0) / total_mcap) * 100.0,
+            sol_dominance: (sol_data.candles.last()
+                .map(|c| c.close * 410_000_000.0)
+                .unwrap_or(0.0) / total_mcap) * 100.0,
             total_volume_24h: global.total_volume,
             market_cap_change_24h: global.market_cap_change_percentage_24h,
-            volume_change_24h: volume_change,
-            defi_dominance: 0.0,  // Would need additional API calls
-            layer1_dominance: layer1_dom,
-            top10_dominance: btc_dom + eth_dom + sol_dom, // Simplified version
-            volatility_index: volatility,
-            ai_sector_dominance: 0.0,    // Add AI sector tracking
-            ai_sector_volume: 0.0,       // AI token volume
-            ai_sector_growth: 0.0,       // AI sector 24h change
-            cross_chain_volume: 0.0,     // Bridge volume
-            dex_volume_share: 0.0,       // DEX vs CEX ratio
+            volume_change_24h: self.calculate_volume_change(&[btc_data, eth_data, sol_data]),
+            defi_dominance: 0.0,
+            layer1_dominance: (l1_volume / global.total_volume) * 100.0,
+            top10_dominance: 0.0,
+            volatility_index: self.calculate_market_volatility(&[btc_data, eth_data, sol_data]),
+            ai_sector_dominance: (ai_volume / global.total_volume) * 100.0,
+            ai_sector_volume: ai_volume,
+            ai_sector_growth: 0.0,
+            cross_chain_volume: l2_volume,
+            dex_volume_share: 0.0,
+            rwa_sector_dominance: (rwa_volume / global.total_volume) * 100.0,
+            rwa_sector_volume: rwa_volume,
         }
     }
 
-    // Add method to calculate market volatility
     fn calculate_market_volatility(&self, data_sets: &[&TechnicalData]) -> f64 {
         let mut total_volatility = 0.0;
         let mut valid_sets = 0;
         
         for data in data_sets {
             if data.candles.len() >= 2 {
-                // Calculate returns for consecutive candles
                 let returns: Vec<f64> = data.candles.windows(2)
                     .map(|window| {
                         (window[1].close - window[0].close) / window[0].close
@@ -857,7 +1030,6 @@ impl CoinGeckoClient {
                     .collect();
                 
                 if !returns.is_empty() {
-                    // Calculate standard deviation of returns
                     let mean = returns.iter().sum::<f64>() / returns.len() as f64;
                     let variance = returns.iter()
                         .map(|r| (r - mean).powi(2))
@@ -870,52 +1042,46 @@ impl CoinGeckoClient {
         }
         
         if valid_sets > 0 {
-            (total_volatility / valid_sets as f64) * 100.0 // Convert to percentage
+            (total_volatility / valid_sets as f64) * 100.0
         } else {
             0.0
         }
     }
 
-    // Update get_technical_analysis to use new metrics
     pub async fn get_technical_analysis(&self) -> Result<MarketTechnicalData> {
         println!("📊 Fetching comprehensive technical data...");
         
-        // Get BTC technical data
+        let category_volumes = self.get_category_volumes().await?;
+        
         println!("🔍 Analyzing BTC...");
         let btc_data = self.get_market_chart("bitcoin", 14).await?;
         
-        // Get ETH technical data with delay
         println!("🔍 Analyzing ETH...");
         tokio::time::sleep(Duration::from_secs(BASE_DELAY)).await;
         let eth_data = self.get_market_chart("ethereum", 14).await?;
         
-        // Get SOL technical data with delay
         println!("🔍 Analyzing SOL...");
         tokio::time::sleep(Duration::from_secs(BASE_DELAY)).await;
         let sol_data = self.get_market_chart("solana", 14).await?;
         
-        // Get trending coins technical data (limited to top 3)
         println!("🔥 Analyzing top trending coins...");
         let trending = self.get_trending_coins().await?;
         let mut trending_data = Vec::new();
         
-        // Improve trending coin filtering with AI consideration
         let relevant_coins: Vec<_> = trending.iter()
             .filter(|c| {
                 let symbol = c.symbol.to_lowercase();
-                // More strict filtering - exclude BTC, ETH, and SOL
-                symbol != "btc" && 
-                symbol != "eth" && 
-                symbol != "sol" && 
-                // Filter out low quality/meme coins but keep AI
-                !symbol.contains("elon") &&
-                !symbol.contains("pepe") &&
+                !symbol.contains("pepe") && 
+                !symbol.contains("meow") &&
+                !symbol.contains("doge") &&
+                !symbol.contains("shib") &&
                 !symbol.contains("moon") &&
-                !symbol.contains("meme") &&
+                !symbol.contains("safe") &&
+                !symbol.contains("elon") &&
                 !symbol.contains("inu") &&
-                // Only include coins with decent market cap rank
+                !symbol.contains("meme") &&
                 c.market_cap_rank
-                    .map(|rank| rank < 200)
+                    .map(|rank| rank < 150)
                     .unwrap_or(false)
             })
             .take(3)
@@ -932,7 +1098,6 @@ impl CoinGeckoClient {
             match self.get_market_chart(&coin.id, 14).await {
                 Ok(data) => {
                     trending_data.push((coin.symbol.clone(), data));
-                    // Add delay between requests
                     tokio::time::sleep(Duration::from_secs(BASE_DELAY)).await;
                 },
                 Err(e) => {
@@ -942,13 +1107,14 @@ impl CoinGeckoClient {
             }
         }
 
-        // Get global market data and calculate comprehensive metrics
         let global = self.get_global_data().await?;
         let global_metrics = self.calculate_market_metrics(
             &global,
             &btc_data,
             &eth_data,
-            &sol_data
+            &sol_data,
+            &trending_data,
+            category_volumes
         );
 
         println!("📊 Market Metrics:");
@@ -957,7 +1123,7 @@ impl CoinGeckoClient {
         println!("  • ETH Dominance: {:.2}%", global_metrics.eth_dominance);
         println!("  • SOL Dominance: {:.2}%", global_metrics.sol_dominance);
         println!("  • Layer 1 Dominance: {:.2}%", global_metrics.layer1_dominance);
-        println!("  • Market Volatility: {:.2}%", global_metrics.volatility_index);
+        println!("  • AI Sector Dominance: {:.2}%", global_metrics.ai_sector_dominance);
 
         Ok(MarketTechnicalData {
             btc_data,
@@ -968,52 +1134,45 @@ impl CoinGeckoClient {
         })
     }
 
-    fn calculate_ai_metrics(&self, trending_data: &[(String, TechnicalData)]) -> (f64, f64, f64) {
-        // Calculate AI sector metrics
-        let ai_tokens: Vec<_> = trending_data.iter()
-            .filter(|(symbol, _)| {
-                let s = symbol.to_lowercase();
-                s.contains("ai") || 
-                s.contains("ml") || 
-                s.contains("graph") ||
-                s.contains("ocean") ||
-                s.contains("fetch")
-            })
-            .collect();
-
-        if ai_tokens.is_empty() {
-            return (0.0, 0.0, 0.0);
+    pub async fn get_coin_technical_analysis(&mut self, coin_id: &str, days: u32) -> Result<TechnicalData> {
+        if let Some((data, timestamp)) = self.cache.get(coin_id) {
+            if timestamp.elapsed() < self.cache_duration {
+                println!("📊 Using cached data for {}", coin_id);
+                return Ok(data.clone());
+            }
         }
 
-        // Calculate total volume
-        let total_volume: f64 = ai_tokens.iter()
-            .map(|(_, data)| data.candles.last().unwrap().volume)
-            .sum();
+        let data = self.get_market_chart(coin_id, days).await?;
+        self.cache.insert(coin_id.to_string(), (data.clone(), Instant::now()));
+        Ok(data)
+    }
 
-        // Calculate average price change (growth)
-        let avg_growth: f64 = ai_tokens.iter()
-            .map(|(_, data)| {
-                let candles = &data.candles;
-                if candles.len() >= 2 {
-                    let last = candles.last().unwrap();
-                    let prev = &candles[candles.len() - 2];
-                    ((last.close - prev.close) / prev.close) * 100.0
-                } else {
-                    0.0
-                }
-            })
-            .sum::<f64>() / ai_tokens.len() as f64;
+    pub async fn get_historical_data(&self, coin_id: &str, days: u32) -> Result<HistoricalData> {
+        let url = format!("{}/coins/{}/market_chart", BASE_URL, coin_id);
+        let params = [
+            ("vs_currency", "usd"),
+            ("days", &days.to_string()),
+            ("interval", "daily"),
+            ("precision", "2"),
+        ];
 
-        // Calculate sector dominance (using market cap)
-        let sector_mcap: f64 = ai_tokens.iter()
-            .map(|(_, data)| data.candles.last().unwrap().close)
-            .sum();
+        println!("📈 Fetching historical data for {} over {} days...", coin_id, days);
+        let data = self.make_request(&url, &params).await?;
+        let historical: HistoricalData = serde_json::from_value(data)?;
+        
+        Ok(historical)
+    }
+}
 
-        // Return (dominance, volume, growth)
+// Add public accessor for sector data
+impl MarketTechnicalData {
+    pub fn sector_volumes(&self) -> (f64, f64, f64, f64) {
         (
-            sector_mcap,  // Dominance (raw market cap sum)
-            total_volume, // Volume
-            avg_growth    // Growth percentage
+            self.global_metrics.ai_sector_volume,
+            self.global_metrics.layer1_dominance * self.global_metrics.total_volume_24h / 100.0,
+            self.global_metrics.cross_chain_volume,
+            self.global_metrics.rwa_sector_volume
         )
     }
 } 
+ 

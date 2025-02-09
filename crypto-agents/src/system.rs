@@ -307,6 +307,16 @@ impl MultiAgentSystem {
             .await?;
         println!("{}", sentiment_response);
         
+        // Add Topic Analysis Phase
+        println!("\n🔍 Topic Analysis Phase...");
+        let topic_analysis = self.topic_agent
+            .analyze_market_topics(
+                &market_data,
+                &technical_response,
+                &sentiment_response
+            ).await?;
+        println!("{}", topic_analysis);
+        
         // Extract tokens with context from all analyses
         println!("\n🔍 Extracting Token Mentions...");
         let round = self.round_history.len() as i32;
@@ -328,7 +338,8 @@ impl MultiAgentSystem {
             .generate_synopsis(
                 &technical_response,
                 &fundamental_response,
-                Some(&sentiment_response)
+                Some(&sentiment_response),
+                Some(&topic_analysis)
             )
             .await?;
         println!("{}", synopsis);

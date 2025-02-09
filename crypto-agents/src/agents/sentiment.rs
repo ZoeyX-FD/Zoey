@@ -193,6 +193,7 @@ impl Agent for SentimentAgent {
         self.base.memory.conversations.push(Conversation {
             timestamp: Utc::now(),
             market_data: market_data.clone(),
+            technical_data: None,
             other_message: previous_message,
             response: sentiment_analysis.clone(),
         });

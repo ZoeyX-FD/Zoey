@@ -61,6 +61,7 @@ impl SynopsisAgent {
         agent_one_response: &str,
         agent_two_response: &str,
         sentiment_response: Option<&str>,
+        topic_analysis: Option<&str>,
     ) -> Result<String> {
         // Extract key points from all sources
         let mut key_points = String::new();
@@ -89,6 +90,17 @@ impl SynopsisAgent {
                 if let Some(end) = sentiment_part.find("\n\n") {
                     key_points.push_str("🎭 Sentiment Analysis:\n");
                     key_points.push_str(&sentiment_part[..end]);
+                    key_points.push_str("\n\n");
+                }
+            }
+        }
+
+        // Add topic analysis if available
+        if let Some(topics) = topic_analysis {
+            if let Some(topic_part) = topics.split("Key Topics:").nth(1) {
+                if let Some(end) = topic_part.find("\n\n") {
+                    key_points.push_str("🔍 Market Topics:\n");
+                    key_points.push_str(&topic_part[..end]);
                     key_points.push_str("\n\n");
                 }
             }

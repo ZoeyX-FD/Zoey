@@ -14,48 +14,63 @@ use super::{Agent, BaseAgent, ModelProvider};
 use crate::models::AgentError;
 
 const TOPIC_SYSTEM_PROMPT: &str = r#"
-You are the Topic Analysis Expert 🎯
-Your role is to analyze specific sectors in the crypto market.
+You are a Market Topics Analysis AI specializing in cryptocurrency market analysis.
 
-Focus on these key sectors:
-1. AI & Machine Learning Tokens 🤖
-2. NFT & Gaming Projects 🎮
-3. DeFi Protocols 💰
-4. Layer 1 Blockchains ⛓️
-5. Meme Coins 🎭
-6. Web3 Infrastructure 🌐
-7. Solana Ecosystem ☀️
-8. Zero Knowledge Projects 🔐
+Your role is to analyze market data, technical analysis, and sentiment to identify key market themes and trends.
 
-For each sector, analyze:
-- Market trends and momentum
-- Key projects and developments
-- Technical indicators
-- Social sentiment
-- Upcoming catalysts
-- Risk factors
+Format your response in the following structure:
 
-Format your response like this:
+🌍 Market Topics Analysis
 
-🔍 Sector Analysis Report
-=======================
-
-📊 Current Hot Sectors:
-[List top 3 performing sectors]
-
-🎯 Sector Deep Dive:
-[Detailed analysis of requested sector]
-
-💡 Key Projects:
-- [Project 1 with analysis]
-- [Project 2 with analysis]
-- [Project 3 with analysis]
+📊 Key Market Themes:
+- [List 3-5 dominant market narratives]
+- [Focus on major price drivers]
+- [Include sector-specific trends]
 
 🚀 Growth Catalysts:
-[Upcoming events/developments]
+- [List 3-4 potential growth drivers]
+- [Include upcoming events/developments]
+- [Highlight positive market indicators]
+- [Format: "Catalyst: Expected Impact"]
 
-⚠️ Risk Assessment:
-[Key risks and concerns]
+⚠️ Risk Factors:
+- [List 3-4 key risks]
+- [Include both macro and micro risks]
+- [Highlight specific warning signs]
+- [Format: "Risk: Potential Impact"]
+
+💡 Trading Implications:
+- [2-3 actionable insights]
+- [Specific sectors to watch]
+- [Risk management considerations]
+
+Guidelines:
+1. Be specific and data-driven
+2. Avoid repetition across sections
+3. Focus on actionable insights
+4. Quantify impacts where possible
+5. Highlight timeframes for catalysts/risks
+
+Example format:
+📊 Key Market Themes:
+- Layer 1 Competition: SOL +15% weekly, outperforming BTC/ETH
+- DeFi Revival: DEX volumes up 25% MoM
+- AI Token Consolidation: Sector down 5% after recent rally
+
+🚀 Growth Catalysts:
+- ETH Dencun Upgrade (March): Potential 30-40% fee reduction
+- BTC Halving (April): Historical bullish impact
+- SOL Ecosystem Growth: Rising TVL, +40% monthly
+
+⚠️ Risk Factors:
+- Regulatory Uncertainty: SEC actions pending
+- Market Correlation: 0.85 correlation with tech stocks
+- Volume Decline: -20% weekly, suggesting weak conviction
+
+💡 Trading Implications:
+- Layer 1 rotation opportunity: Focus on SOL, AVAX
+- Risk Management: Tight stops due to high correlation
+- Timing: Wait for volume confirmation before large positions
 "#;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -66,6 +81,7 @@ pub struct TopicAnalysis {
     pub key_projects: Vec<String>,
     pub catalysts: Vec<String>,
     pub risks: Vec<String>,
+    pub trading_implications: Vec<String>,
 }
 
 pub struct TopicAgent {
@@ -103,6 +119,7 @@ impl TopicAgent {
             key_projects: self.extract_key_projects(&response),
             catalysts: self.extract_catalysts(&response),
             risks: self.extract_risks(&response),
+            trading_implications: self.extract_trading_implications(&response),
         };
 
         // Store in history
@@ -167,6 +184,7 @@ impl TopicAgent {
             key_projects: self.extract_key_points(&response),
             catalysts: self.extract_catalysts(&response),
             risks: self.extract_risks(&response),
+            trading_implications: self.extract_trading_implications(&response),
         };
 
         // Store in history
@@ -268,6 +286,21 @@ impl TopicAgent {
         points
     }
 
+    fn extract_trading_implications(&self, text: &str) -> Vec<String> {
+        let mut implications = Vec::new();
+        if let Some(section) = text.split("💡 Trading Implications:").nth(1) {
+            if let Some(end) = section.find("\n\n") {
+                let lines = section[..end].lines();
+                for line in lines {
+                    if !line.trim().is_empty() {
+                        implications.push(line.trim().to_string());
+                    }
+                }
+            }
+        }
+        implications
+    }
+
     pub fn format_market_data(&self, coin_data: &DetailedCoinData) -> String {
         let mut output = String::new();
         
@@ -361,6 +394,7 @@ Keep insights specific, data-driven, and actionable. If data is limited, provide
             key_projects,
             catalysts,
             risks,
+            trading_implications: self.extract_trading_implications(&response),
         })
     }
 
@@ -380,6 +414,93 @@ Keep insights specific, data-driven, and actionable. If data is limited, provide
         }
         Vec::new()
     }
+
+    pub async fn analyze_market_topics(
+        &self,
+        market_data: &MarketData,
+        technical_analysis: &str,
+        sentiment_analysis: &str
+    ) -> Result<String> {
+        println!("🔄 Processing market topics...");
+
+        // Add shorter timeout and progress indicator
+        let timeout_duration = std::time::Duration::from_secs(15); // Reduced from 30s to 15s
+
+        // 1. Limit data size more aggressively
+        let market_summary = self.summarize_market_data(market_data);
+        // Take only first 500 chars of each analysis
+        let tech_summary = technical_analysis.chars().take(500).collect::<String>();
+        let sentiment_summary = sentiment_analysis.chars().take(500).collect::<String>();
+
+        let context = format!(
+            "Provide brief market analysis (max 3 points per section):\n\n\
+             Market Summary:\n{}\n\n\
+             Technical Summary:\n{}\n\n\
+             Sentiment Summary:\n{}\n\n",
+            market_summary,
+            tech_summary,
+            sentiment_summary
+        );
+
+        println!("⏳ Analyzing market context...");
+        println!("(Timeout set to 15 seconds)");
+
+        // Add timeout with fallback
+        let analysis = match tokio::time::timeout(
+            timeout_duration,
+            self.analyze_topic(&context)
+        ).await {
+            Ok(result) => result?,
+            Err(_) => {
+                println!("⚠️ Analysis timed out, providing simplified response...");
+                return Ok(format!(
+                    "🌍 Market Overview\n\n\
+                     📊 Current State:\n• Market Cap: ${:.2}B\n• 24h Volume: ${:.2}B\n\n\
+                     ⚠️ Note: Detailed analysis timed out, showing basic metrics only.",
+                    market_data.overview.total_market_cap / 1e9,
+                    market_data.overview.total_volume / 1e9
+                ));
+            }
+        };
+
+        // Simplified response format
+        Ok(format!(
+            "🌍 Quick Market Topics Analysis\n\n\
+             📊 Key Themes:\n{}\n\n\
+             🚀 Catalysts:\n{}\n\n\
+             ⚠️ Risks:\n{}\n",
+            analysis.key_projects.iter().take(3).map(|s| format!("• {}", s)).collect::<Vec<_>>().join("\n"),
+            analysis.catalysts.iter().take(3).map(|s| format!("• {}", s)).collect::<Vec<_>>().join("\n"),
+            analysis.risks.iter().take(3).map(|s| format!("• {}", s)).collect::<Vec<_>>().join("\n")
+        ))
+    }
+
+    // Helper to summarize market data
+    fn summarize_market_data(&self, data: &MarketData) -> String {
+        let overview = &data.overview;
+        let trending_coins = &data.trending;
+
+        // Format trending coins with proper string joining
+        let trending_list = trending_coins
+            .iter()
+            .take(3)
+            .map(|c| c.id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        format!(
+            "Market Cap: ${:.2}B\n\
+             24h Volume: ${:.2}B\n\
+             24h Change: {:.2}%\n\
+             Top Trending: {}\n\
+             Market Sentiment: {}",
+            overview.total_market_cap / 1e9,
+            overview.total_volume / 1e9,
+            overview.market_cap_change_percentage_24h,
+            trending_list,
+            if overview.market_cap_change_percentage_24h > 0.0 { "Bullish 📈" } else { "Bearish 📉" }
+        )
+    }
 }
 
 #[async_trait]
@@ -396,13 +517,9 @@ impl Agent for TopicAgent {
         // Analyze each sector
         let sectors = vec![
             "AI & ML Tokens",
-            "NFT & Gaming",
-            "DeFi",
             "Layer 1",
-            "Meme Coins",
-            "Web3",
-            "Solana Ecosystem",
-            "Zero Knowledge"
+            "layer 2"
+           
         ];
 
         let mut full_analysis = String::new();
@@ -431,6 +548,7 @@ impl Agent for TopicAgent {
         self.base.memory.conversations.push(Conversation {
             timestamp: Utc::now(),
             market_data: market_data.clone(),
+            technical_data: None,
             other_message: previous_message,
             response: full_analysis.clone(),
         });

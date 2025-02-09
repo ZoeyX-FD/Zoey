@@ -35,7 +35,7 @@ pub const DEEPSEEK_MODELS: &[&str] = &[
     "deepseek-reasoner",
 ];
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum ModelProvider {
     DeepSeek,
     Gemini,
