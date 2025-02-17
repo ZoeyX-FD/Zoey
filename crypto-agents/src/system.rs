@@ -307,15 +307,14 @@ impl MultiAgentSystem {
             .await?;
         println!("{}", sentiment_response);
         
-        // Add Topic Analysis Phase
-        println!("\n🔍 Topic Analysis Phase...");
-        let topic_analysis = self.topic_agent
+        // Get topic analysis
+        let topic_response = self.topic_agent
             .analyze_market_topics(
                 &market_data,
-                &technical_response,
-                &sentiment_response
-            ).await?;
-        println!("{}", topic_analysis);
+                &technical_response
+            )
+            .await?;
+        println!("{}", topic_response);
         
         // Extract tokens with context from all analyses
         println!("\n🔍 Extracting Token Mentions...");
@@ -339,7 +338,7 @@ impl MultiAgentSystem {
                 &technical_response,
                 &fundamental_response,
                 Some(&sentiment_response),
-                Some(&topic_analysis)
+                Some(&topic_response)
             )
             .await?;
         println!("{}", synopsis);

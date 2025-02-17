@@ -8,12 +8,13 @@ use super::{Agent, BaseAgent, ModelProvider};
 use crate::api::coingecko::{DetailedCoinData, CoinGeckoClient, CandleData, TechnicalData, MarketTechnicalData};
 
 const TECHNICAL_SYSTEM_PROMPT: &str = r#"
-You are Agent One - The Technical Analysis Expert 📊
+You are Agent One - The Technical Analysis and Trader Expert 📊
 Your role is to analyze charts, patterns, and market indicators to identify trading opportunities.
 
 Focus on:
 - Price action and chart patterns
 - Technical indicators (RSI, MACD, stochastics, bollinger bands, etc.)
+- if only have raw limited data i want you to calculate the technical indicators
 - Volume analysis
 - Support/resistance levels
 - Short to medium-term opportunities
@@ -34,6 +35,7 @@ Format your response like this:
 - MA50: ${:.2}\n\
 - MA200: ${:.2}\n\
 - Position: {}\n\
+
 
 🎯 Key Levels:
 - Support: [List key support levels]
@@ -408,55 +410,113 @@ impl TechnicalAgent {
     ) -> Result<String> {
         let mut context = String::new();
 
-        // Add BTC data
-        context.push_str(&format!("\nBitcoin Analysis:\n"));
-        context.push_str(&self.format_coin_data("BTC", &technical_data.btc_data));
+        // Add market overview with more detailed metrics
+        context.push_str(&format!("\n📊 Market Overview:\n"));
+        context.push_str(&format!(
+            "• Total Market Cap: ${:.2}B\n\
+             • BTC Dominance: {:.2}%\n\
+             • Market Cap Change: {:.2}%\n\
+             • Volume Change: {:.2}%\n\
+             • Volatility Index: {:.2}\n",
+            technical_data.global_metrics.total_market_cap / 1e9,
+            technical_data.global_metrics.btc_dominance,
+            technical_data.global_metrics.market_cap_change_24h,
+            technical_data.global_metrics.volume_change_24h,
+            technical_data.global_metrics.volatility_index
+        ));
 
-        // Add ETH data
-        context.push_str(&format!("\nEthereum Analysis:\n"));
-        context.push_str(&self.format_coin_data("ETH", &technical_data.eth_data));
+        // Add sector analysis
+        context.push_str("\n🔍 Sector Analysis:\n");
+        context.push_str(&format!(
+            "• AI Sector: {:.2}% dominance (Volume: ${:.2}B)\n\
+             • Layer 1: {:.2}% dominance\n\
+             • DeFi: {:.2}% dominance\n\
+             • RWA: {:.2}% dominance\n",
+            technical_data.global_metrics.ai_sector_dominance,
+            technical_data.global_metrics.ai_sector_volume / 1e9,
+            technical_data.global_metrics.layer1_dominance,
+            technical_data.global_metrics.defi_dominance,
+            technical_data.global_metrics.rwa_sector_dominance
+        ));
 
-        // Add SOL data
-        context.push_str(&format!("\nSolana Analysis:\n"));
-        context.push_str(&self.format_coin_data("SOL", &technical_data.sol_data));
+        // Enhanced coin analysis
+        let major_coins = [
+            ("BTC", &technical_data.btc_data),
+            ("ETH", &technical_data.eth_data),
+            ("SOL", &technical_data.sol_data)
+        ];
 
-        // Add trending coins
-        context.push_str("\nTrending Coins:\n");
-        for (symbol, data) in &technical_data.trending_data {
-            context.push_str(&format!("\n{} Analysis:\n", symbol));
-            context.push_str(&self.format_coin_data(symbol, data));
+        for (symbol, data) in major_coins {
+            context.push_str(&format!("\n💎 {} Analysis:\n", symbol));
+            context.push_str(&self.format_enhanced_coin_data(symbol, data));
         }
 
-        // Add global metrics
-        context.push_str(&format!("\nGlobal Market Status:\n"));
-        context.push_str(&format!("Total Market Cap: ${:.2}B\n", technical_data.global_metrics.total_market_cap / 1e9));
-        context.push_str(&format!("BTC Dominance: {:.2}%\n", technical_data.global_metrics.btc_dominance));
-        context.push_str(&format!("24h Volume: ${:.2}B\n", technical_data.global_metrics.total_volume_24h / 1e9));
-        context.push_str(&format!("Market Cap Change: {:.2}%\n", technical_data.global_metrics.market_cap_change_24h));
+        // Add trending coins with enhanced analysis
+        context.push_str("\n🔥 Trending Coins:\n");
+        for (symbol, data) in &technical_data.trending_data {
+            context.push_str(&format!("\n{} Analysis:\n", symbol));
+            context.push_str(&self.format_enhanced_coin_data(symbol, data));
+        }
 
-        // Get AI analysis
-        let response = self.base.generate_response("Analyze the current market conditions from a technical analysis perspective.", Some(&context)).await?;
+        // Get AI analysis with enhanced prompt
+        let response = self.base.generate_response(
+            "Analyze the current market conditions from a technical analysis perspective. \
+             Focus on identifying key patterns, trend strength, and potential trading opportunities. \
+             Include specific price targets and risk levels.",
+            Some(&context)
+        ).await?;
         
         Ok(response)
     }
 
-    fn format_coin_data(&self, symbol: &str, data: &TechnicalData) -> String {
+    fn format_enhanced_coin_data(&self, _symbol: &str, data: &TechnicalData) -> String {
         let mut analysis = String::new();
         
-        let price = data.candles.last().unwrap().close;
+        let price = data.current_price.unwrap_or_else(|| data.candles.last().unwrap().close);
         let rsi = data.rsi_14.unwrap_or_default();
         let ma50 = data.ma_50.unwrap_or_default();
         let ma200 = data.ma_200.unwrap_or_default();
 
-        analysis.push_str(&format!("💎 {} Analysis:\n", symbol));
-        analysis.push_str(&format!("Price: ${:.2}\n", price));
-        analysis.push_str(&format!("RSI (14): {:.2}\n", rsi));
-        analysis.push_str(&format!("50 MA: ${:.2}\n", ma50));
-        analysis.push_str(&format!("200 MA: ${:.2}\n", ma200));
-        analysis.push_str(&format!("Trend: {}\n", self.determine_trend(data)));
+        // Enhanced price analysis
+        analysis.push_str(&format!("• Price: ${:.2}\n", price));
+        if let Some(change) = data.price_change_24h {
+            analysis.push_str(&format!("• 24h Change: {:.2}%\n", change));
+        }
 
+        // Enhanced technical indicators
+        analysis.push_str(&format!("• RSI (14): {:.2} - {}\n", rsi, self.interpret_rsi(rsi)));
+        
+        // Enhanced MA analysis with crossover detection
+        analysis.push_str(&format!("• 50 MA: ${:.2}\n", ma50));
+        analysis.push_str(&format!("• 200 MA: ${:.2}\n", ma200));
+        analysis.push_str(&format!("• MA Status: {}\n", self.analyze_ma_status(price, ma50, ma200)));
+
+        // Add MACD analysis
+        if let Some((macd, signal, hist)) = data.macd {
+            analysis.push_str(&format!("• MACD: {:.2}/{:.2}/{:.2} - {}\n", 
+                macd, signal, hist, 
+                if hist > 0.0 { "Bullish" } else { "Bearish" }
+            ));
+        }
+
+        // Add Bollinger Bands analysis
+        if let Some((upper, middle, lower)) = data.bollinger_bands {
+            analysis.push_str(&format!("• Bollinger Bands: {}\n", 
+                self.analyze_bollinger_bands(price, upper, middle, lower)
+            ));
+        }
+
+        // Enhanced volume analysis
+        if let Some(volume) = data.volume_24h {
+            analysis.push_str(&format!("• Volume: ${:.2}B ({})\n", 
+                volume / 1e9,
+                self.determine_volume_trend(volume)
+            ));
+        }
+
+        // Add pattern detection
         if let Some(patterns) = self.detect_patterns(&data.candles) {
-            analysis.push_str(&format!("Patterns: {}\n", patterns));
+            analysis.push_str(&format!("• Patterns: {}\n", patterns));
         }
 
         analysis
@@ -691,6 +751,69 @@ impl TechnicalAgent {
             data.global_metrics.total_market_cap / 1e9,
             days
         )
+    }
+
+    fn interpret_rsi(&self, rsi: f64) -> &str {
+        match rsi {
+            r if r >= 70.0 => "Overbought ⚠️",
+            r if r <= 30.0 => "Oversold 🔥",
+            r if r > 50.0 => "Bullish ↗️",
+            r if r < 50.0 => "Bearish ↘️",
+            _ => "Neutral ↔️",
+        }
+    }
+
+    fn analyze_ma_status(&self, price: f64, ma50: f64, ma200: f64) -> String {
+        let mut status = Vec::new();
+        
+        // Check MA50
+        if price > ma50 {
+            status.push("Above 50MA (Bullish)");
+        } else {
+            status.push("Below 50MA (Bearish)");
+        }
+
+        // Check MA200
+        if price > ma200 {
+            status.push("Above 200MA (Bullish)");
+        } else {
+            status.push("Below 200MA (Bearish)");
+        }
+
+        // Check for Golden/Death Cross
+        if (ma50 - ma200).abs() / ma200 < 0.01 {
+            if ma50 > ma200 {
+                status.push("Potential Golden Cross 🔥");
+            } else {
+                status.push("Potential Death Cross ⚠️");
+            }
+        }
+
+        status.join(", ")
+    }
+
+    fn analyze_bollinger_bands(&self, price: f64, upper: f64, middle: f64, lower: f64) -> String {
+        let band_width = (upper - lower) / middle * 100.0;
+        
+        let position = if price >= upper {
+            "Above Upper Band (Overbought) ⚠️"
+        } else if price <= lower {
+            "Below Lower Band (Oversold) 🔥"
+        } else if price > middle {
+            "Above Middle Band ↗️"
+        } else {
+            "Below Middle Band ↘️"
+        };
+
+        let volatility = if band_width > 40.0 {
+            "High Volatility"
+        } else if band_width < 20.0 {
+            "Low Volatility"
+        } else {
+            "Normal Volatility"
+        };
+
+        format!("{} | {} | Width: {:.1}%", position, volatility, band_width)
     }
 }
 

@@ -8,7 +8,8 @@ use chrono::Utc;
 use std::collections::HashMap;
 use chrono::DateTime;
 use chrono::Duration;
-use crypto_agents::agents::{ModelProvider, TopicAgent, ExtractorAgent};
+use chrono::Timelike;
+use crypto_agents::agents::{ModelProvider, BaseAgent};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct TweetData {
@@ -51,6 +52,41 @@ struct UserMetrics {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct UserInsights {
+    influence_score: f64,
+    engagement_rate: f64,
+    posting_patterns: PostingPatterns,
+    key_topics: Vec<String>,
+    notable_connections: Vec<Connection>,
+    information_value: InformationValue,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PostingPatterns {
+    peak_hours: Vec<u32>,
+    most_active_days: Vec<String>,
+    tweet_frequency: f64,
+    reply_rate: f64,
+    retweet_rate: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Connection {
+    username: String,
+    interaction_count: i32,
+    relationship_type: String, // e.g., "frequently_mentioned", "regular_engagement", "potential_insider"
+    last_interaction: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct InformationValue {
+    alpha_score: f64,  // How often they share valuable "alpha"
+    accuracy_rate: f64, // Historical accuracy of their calls/predictions
+    insider_probability: f64, // Likelihood of having insider knowledge
+    unique_insights: Vec<String>, // Notable unique insights shared
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct ContentAnalysis {
     top_hashtags: HashMap<String, i32>,
     top_mentions: HashMap<String, i32>,
@@ -58,17 +94,9 @@ struct ContentAnalysis {
     avg_sentiment: f64,
     key_topics: Vec<String>,
     common_phrases: HashMap<String, i32>,
-    ai_summary: Option<AISummary>,  // Optional because it's only present in detailed mode
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct AISummary {
-    topics: Vec<String>,
-    catalysts: Vec<String>,
-    risks: Vec<String>,
-    sentiment: String,
-    sector: String,
     token_mentions: Vec<TokenMention>,
+    ai_analysis: String,
+    user_insights: UserInsights,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -84,13 +112,6 @@ struct ExtractSettings {
     since_date: Option<DateTime<Utc>>,
     include_replies: bool,
     include_retweets: bool,
-    analysis_mode: AnalysisMode,
-}
-
-#[derive(Debug, Clone)]
-enum AnalysisMode {
-    Quick,
-    Detailed,
 }
 
 impl Default for ExtractSettings {
@@ -100,20 +121,15 @@ impl Default for ExtractSettings {
             since_date: None,
             include_replies: true,
             include_retweets: true,
-            analysis_mode: AnalysisMode::Quick,
         }
     }
 }
 
 impl ExtractSettings {
-    fn new(max_tweets: i32, days_ago: Option<i64>, mode: Option<String>) -> Self {
+    fn new(max_tweets: i32, days_ago: Option<i64>, _mode: Option<String>) -> Self {
         Self {
             max_tweets,
             since_date: days_ago.map(|days| Utc::now() - Duration::days(days)),
-            analysis_mode: match mode.as_deref() {
-                Some("ai") => AnalysisMode::Detailed,
-                _ => AnalysisMode::Quick,
-            },
             ..Default::default()
         }
     }
@@ -152,87 +168,264 @@ fn calculate_stats(tweets: &[TweetData]) -> TweetStats {
     }
 }
 
-async fn analyze_user_profile(tweets: &[TweetData], stats: &TweetStats, username: &str) -> Result<AISummary> {
-    let topic_agent = TopicAgent::new(
-        "google/gemini-2.0-flash-001".to_string(),
-        ModelProvider::OpenRouter
-    ).await?;
+struct TwitterAnalyzer {
+    base: BaseAgent,
+}
 
-    let extractor_agent = ExtractorAgent::new(
-        "google/gemini-2.0-flash-001".to_string(),
-        ModelProvider::OpenRouter
-    ).await?;
+impl TwitterAnalyzer {
+    async fn new(model: String, provider: ModelProvider) -> Result<Self> {
+        let preamble = "You are an expert Twitter Analyst. Analyze user activity and provide insights about this user focusing on:
+        1. Key topics and themes
+        2. Market sentiment
+        3. Notable projects mentioned
+        4. secret information related to crypto projects
+        5. Trading strategies discussed
+        6. Example engagement tweets
+        7. Overall engagement patterns";
 
-    // Convert tweets to string
-    let tweet_texts: Vec<String> = tweets.iter()
-        .filter_map(|t| t.content.clone())
-        .take(50)
-        .collect();
-    
-    let tweet_sample = tweet_texts.join("\n\n");
+        let base = BaseAgent::new(
+            "Twitter Analyzer".to_string(),
+            model,
+            preamble.to_string(),
+            provider
+        ).await?;
 
-    // Extract tokens from all tweets
-    let mut token_mentions = HashMap::new();
-    let mut token_contexts = HashMap::new();
+        Ok(Self { base })
+    }
 
-    for tweet in tweets {
-        if let Some(content) = &tweet.content {
-            if let Ok(tokens) = extractor_agent.extract_tokens(content).await {
-                for token in tokens {
-                    *token_mentions.entry(token.clone()).or_insert(0) += 1;
-                    token_contexts.entry(token)
-                        .or_insert_with(Vec::new)
-                        .push(content.clone());
+    async fn analyze(&self, text: &str) -> Result<String> {
+        self.base.generate_response(text, None).await
+    }
+
+    async fn extract_tokens(&self, text: &str) -> Result<Vec<String>> {
+        let mut tokens = Vec::new();
+        
+        // Split text into words and analyze each word
+        for word in text.split_whitespace() {
+            let word = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '$' && c != '#');
+            
+            // Check for $SYMBOL pattern
+            if word.starts_with('$') && word.len() > 1 {
+                let symbol = word[1..].trim_matches(|c: char| !c.is_alphanumeric());
+                if !symbol.is_empty() {
+                    tokens.push(symbol.to_uppercase());
+                }
+            }
+            // Check for #TOKEN pattern
+            else if word.starts_with('#') && word.len() > 1 {
+                let token = word[1..].trim_matches(|c: char| !c.is_alphanumeric());
+                if !token.is_empty() {
+                    tokens.push(token.to_uppercase());
+                }
+            }
+            // Check for standalone token patterns (BTC, ETH, etc.)
+            else if word.chars().all(|c| c.is_ascii_alphanumeric()) && word.len() >= 2 && word.len() <= 5 {
+                let upper_word = word.to_uppercase();
+                if ["BTC", "ETH", "SOL", "USDT", "BNB"].contains(&upper_word.as_str()) {
+                    tokens.push(upper_word);
                 }
             }
         }
+        
+        // Remove duplicates while preserving order
+        let mut unique_tokens = Vec::new();
+        for token in tokens {
+            if !unique_tokens.contains(&token) {
+                unique_tokens.push(token);
+            }
+        }
+        
+        Ok(unique_tokens)
     }
 
-    // Convert to sorted vec of TokenMention
-    let mut token_mentions: Vec<TokenMention> = token_mentions.into_iter()
-        .map(|(symbol, count)| {
-            let contexts = token_contexts.get(&symbol)
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .take(3)  // Keep only 3 example contexts per token
-                .collect();
-                
-            TokenMention {
-                symbol: symbol.clone(),  // Clone here before moving into struct
-                count,
-                context: contexts,
+    async fn analyze_user_patterns(&self, tweets: &[TweetData]) -> PostingPatterns {
+        let mut hour_counts = HashMap::new();
+        let mut day_counts = HashMap::new();
+        let mut reply_count = 0;
+        let mut retweet_count = 0;
+
+        for tweet in tweets {
+            if let Some(date) = tweet.created_at.as_ref() {
+                if let Ok(parsed_date) = DateTime::parse_from_rfc3339(date) {
+                    let hour = parsed_date.hour();
+                    let day = parsed_date.format("%A").to_string();
+                    
+                    *hour_counts.entry(hour).or_insert(0) += 1;
+                    *day_counts.entry(day).or_insert(0) += 1;
+                }
             }
-        })
-        .collect();
+            
+            // Count replies and retweets
+            if tweet.content.as_ref().map_or(false, |c| c.starts_with('@')) {
+                reply_count += 1;
+            }
+            if tweet.content.as_ref().map_or(false, |c| c.to_lowercase().contains("rt @")) {
+                retweet_count += 1;
+            }
+        }
 
-    token_mentions.sort_by(|a, b| b.count.cmp(&a.count));
-    let token_mentions: Vec<TokenMention> = token_mentions.into_iter().take(10).collect();
+        // Get peak hours (top 3)
+        let mut peak_hours: Vec<_> = hour_counts.into_iter().collect();
+        peak_hours.sort_by(|a, b| b.1.cmp(&a.1));
+        let peak_hours: Vec<u32> = peak_hours.into_iter().take(3).map(|(h, _)| h).collect();
 
-    // Add token information to the prompt
+        // Get most active days
+        let mut active_days: Vec<_> = day_counts.into_iter().collect();
+        active_days.sort_by(|a, b| b.1.cmp(&a.1));
+        let most_active_days: Vec<_> = active_days.into_iter().take(3).map(|(d, _)| d).collect();
+
+        PostingPatterns {
+            peak_hours,
+            most_active_days,
+            tweet_frequency: tweets.len() as f64 / 30.0, // tweets per day assuming 30 day period
+            reply_rate: reply_count as f64 / tweets.len() as f64,
+            retweet_rate: retweet_count as f64 / tweets.len() as f64,
+        }
+    }
+
+    async fn analyze_connections(&self, tweets: &[TweetData]) -> Vec<Connection> {
+        let mut interactions = HashMap::new();
+        let mut last_interactions = HashMap::new();
+
+        for tweet in tweets {
+            if let Some(content) = &tweet.content {
+                // Extract mentions
+                let mentions: Vec<_> = content
+                    .split_whitespace()
+                    .filter(|word| word.starts_with('@'))
+                    .map(|word| word.trim_matches(|c| !char::is_alphanumeric(c)))
+                    .collect();
+
+                for mention in mentions {
+                    *interactions.entry(mention.to_string()).or_insert(0) += 1;
+                    last_interactions.insert(mention.to_string(), tweet.created_at.clone().unwrap_or_default());
+                }
+            }
+        }
+
+        let mut connections: Vec<Connection> = interactions
+            .into_iter()
+            .map(|(username, count)| {
+                let relationship_type = if count > 10 {
+                    "frequently_mentioned"
+                } else if count > 5 {
+                    "regular_engagement"
+                } else {
+                    "occasional_interaction"
+                };
+
+                Connection {
+                    username: username.clone(),
+                    interaction_count: count,
+                    relationship_type: relationship_type.to_string(),
+                    last_interaction: last_interactions.get(&username).cloned().unwrap_or_default(),
+                }
+            })
+            .collect();
+
+        connections.sort_by(|a, b| b.interaction_count.cmp(&a.interaction_count));
+        connections.into_iter().take(10).collect()
+    }
+
+    async fn calculate_information_value(&self, tweets: &[TweetData]) -> InformationValue {
+        let mut alpha_count = 0;
+        let mut prediction_count = 0;
+        let mut unique_insights = Vec::new();
+
+        for tweet in tweets {
+            if let Some(content) = &tweet.content {
+                let lower_content = content.to_lowercase();
+                
+                // Check for alpha indicators
+                if lower_content.contains("alpha") || 
+                   lower_content.contains("leaked") || 
+                   lower_content.contains("insider") ||
+                   lower_content.contains("exclusive") {
+                    alpha_count += 1;
+                }
+
+                // Check for predictions and use the count
+                if lower_content.contains("predict") || 
+                   lower_content.contains("expect") ||
+                   lower_content.contains("soon") ||
+                   lower_content.contains("incoming") {
+                    prediction_count += 1;
+                }
+
+                // Extract unique insights
+                if content.len() > 100 && 
+                   (lower_content.contains("thread") || 
+                    lower_content.contains("1/") ||
+                    lower_content.contains("analysis")) {
+                    unique_insights.push(content.clone());
+                }
+            }
+        }
+
+        // Use prediction_count in calculating accuracy_rate
+        let accuracy_rate = if prediction_count > 0 {
+            // Simple heuristic: more predictions = potentially lower accuracy
+            (1.0 / (prediction_count as f64)).min(0.8)
+        } else {
+            0.0
+        };
+
+        InformationValue {
+            alpha_score: alpha_count as f64 / tweets.len() as f64,
+            accuracy_rate,
+            insider_probability: if alpha_count > 5 { 0.7 } else { 0.3 },
+            unique_insights: unique_insights.into_iter().take(5).collect(),
+        }
+    }
+}
+
+async fn analyze_user_profile(tweets: &[TweetData], stats: &TweetStats, username: &str) -> Result<ContentAnalysis> {
+    let analyzer = TwitterAnalyzer::new(
+        "gemini-2.0-pro-exp-02-05".to_string(),
+        ModelProvider::Gemini
+    ).await?;
+
+    // Analyze user patterns and connections
+    let posting_patterns = analyzer.analyze_user_patterns(tweets).await;
+    let notable_connections = analyzer.analyze_connections(tweets).await;
+    let information_value = analyzer.calculate_information_value(tweets).await;
+
+    // Calculate influence score
+    let influence_score = (stats.total_likes + stats.total_retweets * 2) as f64 / 
+                         (tweets.len() as f64 * 100.0);
+    
+    // Calculate engagement rate
+    let engagement_rate = if stats.total_views > 0 {
+        (stats.total_likes + stats.total_retweets) as f64 / stats.total_views as f64 * 100.0
+    } else {
+        0.0
+    };
+
+    let user_insights = UserInsights {
+        influence_score,
+        engagement_rate,
+        posting_patterns,
+        key_topics: extract_key_topics(tweets),
+        notable_connections,
+        information_value,
+    };
+
+    // Create analysis prompt
     let prompt = format!(
-        "Analyze this Twitter user @{} based on their recent activity:\n\
-         \nTweet Stats:\
-         \n- Total tweets: {}\
-         \n- Total likes: {}\
-         \n- Total retweets: {}\
-         \n- Total views: {}\
-         \nTop Hashtags: {}\
-         \nTop Mentions: {}\
-         \nToken Mentions: {}\
-         \n\nRecent Tweets Sample:\n{}\
-         \n\nProvide analysis focusing on:\
-         \n1. Key topics and themes\
-         \n2. Market catalysts and opportunities\
-         \n3. Potential risks and challenges\
-         \n4. Overall sentiment and tone\
-         \n5. Main sector/area of expertise\
-         \n6. Token analysis and trading activity",
+        "You are an expert Twitter Analyst. Analyze this Twitter user's activity and provide insights.\n\n\
+        User: @{}\n\
+        Stats:\n\
+        - Total tweets analyzed: {}\n\
+        - Total engagement: {} likes, {} retweets\n\
+        - Average views per tweet: {}\n\
+        \nTop Hashtags: {}\n\
+        Top Mentions: {}\n\
+        \nTweet Sample:\n{}\n",
         username,
         stats.total_tweets,
         stats.total_likes,
         stats.total_retweets,
-        stats.total_views,
+        if stats.total_tweets > 0 { stats.total_views / stats.total_tweets as i32 } else { 0 },
         stats.top_hashtags.iter()
             .take(5)
             .map(|(tag, count)| format!("#{} ({})", tag, count))
@@ -243,22 +436,64 @@ async fn analyze_user_profile(tweets: &[TweetData], stats: &TweetStats, username
             .map(|(user, count)| format!("@{} ({})", user, count))
             .collect::<Vec<_>>()
             .join(", "),
-        token_mentions.iter()
-            .map(|t| format!("{} ({} mentions)", t.symbol, t.count))
+        tweets.iter()
+            .filter_map(|t| t.content.clone())
+            .take(50)
             .collect::<Vec<_>>()
-            .join(", "),
-        tweet_sample
+            .join("\n\n")
     );
 
-    let analysis = topic_agent.analyze_topic(&prompt).await?;
+    // Get AI analysis
+    let ai_analysis = analyzer.analyze(&prompt).await?;
 
-    Ok(AISummary {
-        topics: analysis.key_projects,
-        catalysts: analysis.catalysts,
-        risks: analysis.risks,
-        sentiment: format!("{:.2}", analysis.sentiment),
-        sector: analysis.sector,
+    // Extract tokens from tweets
+    let mut token_mentions = HashMap::new();
+    let mut token_contexts = HashMap::new();
+
+    for tweet in tweets {
+        if let Some(content) = &tweet.content {
+            if let Ok(tokens) = analyzer.extract_tokens(content).await {
+                for token in tokens {
+                    *token_mentions.entry(token.clone()).or_insert(0) += 1;
+                    token_contexts.entry(token)
+                        .or_insert_with(Vec::new)
+                        .push(content.clone());
+                }
+            }
+        }
+    }
+
+    // Process token mentions
+    let mut token_mentions: Vec<TokenMention> = token_mentions.into_iter()
+        .map(|(symbol, count)| {
+            let contexts = token_contexts.get(&symbol)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .take(3)
+                .collect();
+            
+            TokenMention {
+                symbol: symbol.clone(),
+                count,
+                context: contexts,
+            }
+        })
+        .collect();
+
+    token_mentions.sort_by(|a, b| b.count.cmp(&a.count));
+    let token_mentions = token_mentions.into_iter().take(10).collect();
+
+    Ok(ContentAnalysis {
+        top_hashtags: stats.top_hashtags.clone(),
+        top_mentions: stats.top_mentions.clone(),
+        sentiment_scores: calculate_sentiment_scores(tweets),
+        avg_sentiment: calculate_avg_sentiment(tweets),
+        key_topics: extract_key_topics(tweets),
+        common_phrases: extract_common_phrases(tweets),
         token_mentions,
+        ai_analysis,
+        user_insights,
     })
 }
 
@@ -342,61 +577,104 @@ fn extract_common_phrases(tweets: &[TweetData]) -> HashMap<String, i32> {
         .collect()
 }
 
-fn print_analysis_summary(user_data: &UserData, _mode: &AnalysisMode) {
+fn print_analysis_summary(user_data: &UserData) {
     println!("\n📊 Analysis for @{}:", user_data.username);
-    println!("\nMetrics:");
+    println!("📅 Analysis Date: {}", user_data.extracted_at);
+    
+    println!("\n📈 Metrics:");
     println!("  • Total tweets: {}", user_data.metrics.total_tweets);
     println!("  • Total likes: {}", user_data.metrics.total_likes);
     println!("  • Total retweets: {}", user_data.metrics.total_retweets);
     println!("  • Total views: {}", user_data.metrics.total_views);
     println!("  • Engagement rate: {:.2}%", user_data.metrics.avg_engagement_rate);
 
-    println!("\nTop Hashtags:");
+    // Get date range of tweets
+    let dates: Vec<DateTime<Utc>> = user_data.tweets.iter()
+        .filter_map(|t| t.created_at.as_ref())
+        .filter_map(|d| DateTime::parse_from_rfc3339(d).ok())
+        .map(|d| d.with_timezone(&Utc))
+        .collect();
+    
+    if let (Some(earliest), Some(latest)) = (dates.iter().min(), dates.iter().max()) {
+        println!("\n📅 Tweet Date Range:");
+        println!("  • Earliest: {}", earliest.format("%Y-%m-%d %H:%M UTC"));
+        println!("  • Latest: {}", latest.format("%Y-%m-%d %H:%M UTC"));
+    }
+
+    println!("\n🔍 AI Analysis:");
+    println!("{}", user_data.analysis.ai_analysis);
+
+    println!("\n#️⃣ Top Hashtags:");
     for (tag, count) in user_data.analysis.top_hashtags.iter().take(5) {
         println!("  • #{}: {} times", tag, count);
     }
 
-    println!("\nTop Mentions:");
+    println!("\n👥 Top Mentions:");
     for (user, count) in user_data.analysis.top_mentions.iter().take(5) {
         println!("  • @{}: {} times", user, count);
     }
 
-    println!("\nKey Topics:");
+    println!("\n📝 Key Topics:");
     for topic in &user_data.analysis.key_topics {
         println!("  • {}", topic);
     }
 
-    println!("\nSentiment Analysis:");
+    println!("\n🎭 Sentiment Analysis:");
     println!("  • Average sentiment: {:.2}", user_data.analysis.avg_sentiment);
 
-    if let Some(ai) = &user_data.analysis.ai_summary {
-        println!("\n🤖 AI Analysis:");
-        println!("\nTopics:");
-        for topic in &ai.topics {
-            println!("  • {}", topic);
-        }
-
-        println!("\nCatalysts:");
-        for catalyst in &ai.catalysts {
-            println!("  • {}", catalyst);
-        }
-
-        println!("\nRisks:");
-        for risk in &ai.risks {
-            println!("  • {}", risk);
-        }
-
-        println!("\nSector: {}", ai.sector);
-        println!("Sentiment: {}", ai.sentiment);
-
-        println!("\n💰 Token Mentions:");
-        for token in &ai.token_mentions {
-            println!("  • {} (mentioned {} times)", token.symbol, token.count);
-            println!("    Example contexts:");
-            for context in token.context.iter().take(2) {
-                println!("    - {}", context);
+    println!("\n💰 Token Mentions:");
+    for token in &user_data.analysis.token_mentions {
+        println!("  • {} (mentioned {} times)", token.symbol, token.count);
+        println!("    Example contexts with dates:");
+        for (i, context) in token.context.iter().take(2).enumerate() {
+            // Find the tweet that contains this context to get its date
+            if let Some(tweet) = user_data.tweets.iter()
+                .find(|t| t.content.as_ref().map_or(false, |c| c == context)) {
+                if let Some(date) = tweet.created_at.as_ref() {
+                    if let Ok(parsed_date) = DateTime::parse_from_rfc3339(date) {
+                        println!("    {}. [{}] {}", 
+                            i + 1,
+                            parsed_date.with_timezone(&Utc).format("%Y-%m-%d %H:%M UTC"),
+                            context
+                        );
+                    } else {
+                        println!("    {}. {}", i + 1, context);
+                    }
+                } else {
+                    println!("    {}. {}", i + 1, context);
+                }
+            } else {
+                println!("    {}. {}", i + 1, context);
             }
         }
+    }
+
+    println!("\n🔍 User Insights:");
+    println!("  • Influence Score: {:.2}", user_data.analysis.user_insights.influence_score);
+    println!("  • Engagement Rate: {:.2}%", user_data.analysis.user_insights.engagement_rate);
+    
+    println!("\n⏰ Posting Patterns:");
+    println!("  • Peak Hours: {:?}", user_data.analysis.user_insights.posting_patterns.peak_hours);
+    println!("  • Most Active Days: {:?}", user_data.analysis.user_insights.posting_patterns.most_active_days);
+    println!("  • Tweet Frequency: {:.1} tweets/day", user_data.analysis.user_insights.posting_patterns.tweet_frequency);
+    println!("  • Reply Rate: {:.1}%", user_data.analysis.user_insights.posting_patterns.reply_rate * 100.0);
+    println!("  • Retweet Rate: {:.1}%", user_data.analysis.user_insights.posting_patterns.retweet_rate * 100.0);
+
+    println!("\n🤝 Notable Connections:");
+    for connection in &user_data.analysis.user_insights.notable_connections {
+        println!("  • {} ({} interactions) - {}", 
+            connection.username,
+            connection.interaction_count,
+            connection.relationship_type
+        );
+    }
+
+    println!("\n💎 Information Value:");
+    println!("  • Alpha Score: {:.2}", user_data.analysis.user_insights.information_value.alpha_score);
+    println!("  • Insider Probability: {:.2}", user_data.analysis.user_insights.information_value.insider_probability);
+    println!("\n  Notable Insights:");
+    for (i, insight) in user_data.analysis.user_insights.information_value.unique_insights.iter().enumerate() {
+        println!("  {}. {}", i + 1, insight);
     }
 }
 
@@ -508,34 +786,46 @@ async fn process_user(username: &str, settings: &ExtractSettings, scraper: &mut 
     let stats = calculate_stats(&tweets);
     let stats_clone = stats.clone();
 
-    // Get AI analysis if in detailed mode
-    let ai_summary = match settings.analysis_mode {
-        AnalysisMode::Detailed => {
-            match analyze_user_profile(&tweets, &stats, username).await {
-                Ok(analysis) => Some(analysis),
-                Err(e) => {
-                    println!("⚠️ Error generating AI analysis: {}", e);
-                    None
-                }
+    // Get initial analysis with token extraction
+    let analysis = match analyze_user_profile(&tweets, &stats, username).await {
+        Ok(analysis) => analysis,
+        Err(e) => {
+            println!("⚠️ Error generating analysis: {}", e);
+            ContentAnalysis {
+                top_hashtags: stats_clone.top_hashtags,
+                top_mentions: stats_clone.top_mentions,
+                sentiment_scores: calculate_sentiment_scores(&tweets),
+                avg_sentiment: calculate_avg_sentiment(&tweets),
+                key_topics: extract_key_topics(&tweets),
+                common_phrases: extract_common_phrases(&tweets),
+                token_mentions: Vec::new(),
+                ai_analysis: "Analysis unavailable".to_string(),
+                user_insights: UserInsights {
+                    influence_score: 0.0,
+                    engagement_rate: 0.0,
+                    posting_patterns: PostingPatterns {
+                        peak_hours: Vec::new(),
+                        most_active_days: Vec::new(),
+                        tweet_frequency: 0.0,
+                        reply_rate: 0.0,
+                        retweet_rate: 0.0,
+                    },
+                    key_topics: Vec::new(),
+                    notable_connections: Vec::new(),
+                    information_value: InformationValue {
+                        alpha_score: 0.0,
+                        accuracy_rate: 0.0,
+                        insider_probability: 0.0,
+                        unique_insights: Vec::new(),
+                    },
+                },
             }
-        },
-        AnalysisMode::Quick => None,
-    };
-
-    // Create content analysis
-    let analysis = ContentAnalysis {
-        top_hashtags: stats_clone.top_hashtags,
-        top_mentions: stats_clone.top_mentions,
-        sentiment_scores: calculate_sentiment_scores(&tweets),
-        avg_sentiment: calculate_avg_sentiment(&tweets),
-        key_topics: extract_key_topics(&tweets),
-        common_phrases: extract_common_phrases(&tweets),
-        ai_summary,
+        }
     };
 
     // Create user data with proper String conversion
     let user_data = UserData {
-        username: username.to_string(),  // Convert &str to String
+        username: username.to_string(),
         extracted_at: Utc::now().to_rfc3339(),
         tweets: tweets.clone(),
         metrics: UserMetrics {
@@ -564,7 +854,7 @@ async fn process_user(username: &str, settings: &ExtractSettings, scraper: &mut 
     println!("💾 Saved complete analysis to {}", filename);
 
     // Print summary
-    print_analysis_summary(&user_data, &settings.analysis_mode);
+    print_analysis_summary(&user_data);
 
     Ok(())
 }
@@ -628,10 +918,6 @@ async fn main() -> Result<()> {
     if let Some(since) = settings.since_date {
         println!("- Since date: {}", since.format("%Y-%m-%d"));
     }
-    println!("- Mode: {}", match settings.analysis_mode {
-        AnalysisMode::Quick => "Quick stats",
-        AnalysisMode::Detailed => "Detailed AI analysis",
-    });
 
     // Create data directory
     let data_dir = Path::new("data/twitter_data");

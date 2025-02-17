@@ -4,6 +4,7 @@ pub mod character;
 pub mod document_loader;
 pub mod providers;
 pub mod storage;
+pub mod exa;
 
 pub use error::AgentError;
 pub use document_loader::DocumentLoader;  // Re-export DocumentLoader

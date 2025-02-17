@@ -1,7 +1,12 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use reqwest::Client as HttpClient;
 use anyhow::Result;
-use rig::completion::{CompletionModel, CompletionRequest, CompletionResponse, ModelChoice, PromptError, CompletionError};
+use rig::completion::{
+    CompletionModel, CompletionRequest, CompletionResponse, 
+    Message, PromptError, CompletionError, AssistantContent
+};
+use rig::message::{Text, UserContent};
+use rig::OneOrMany;
 use rig::agent::AgentBuilder;
 use serde_json::json;
 
@@ -55,25 +60,28 @@ pub struct MistralResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct Choice {
-    pub message: Message,
+    pub message: MistralMessage,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Message {
+#[derive(Debug, Deserialize)]
+pub struct MistralMessage {
     pub role: String,
     pub content: String,
 }
 
 impl TryFrom<MistralResponse> for CompletionResponse<MistralResponse> {
-    type Error = rig::completion::CompletionError;
+    type Error = CompletionError;
 
     fn try_from(value: MistralResponse) -> Result<Self, Self::Error> {
         match value.choices.first() {
-            Some(choice) => Ok(CompletionResponse {
-                choice: ModelChoice::Message(choice.message.content.clone()),
-                raw_response: value,
-            }),
-            None => Err(rig::completion::CompletionError::ResponseError(
+            Some(choice) => {
+                let text = Text { text: choice.message.content.clone() };
+                Ok(CompletionResponse {
+                    choice: OneOrMany::one(AssistantContent::Text(text)),
+                    raw_response: value,
+                })
+            },
+            None => Err(CompletionError::ResponseError(
                 "No completion choices returned".into(),
             )),
         }
@@ -92,7 +100,7 @@ impl CompletionModel for MistralCompletionModel {
     async fn completion(
         &self,
         request: CompletionRequest,
-    ) -> Result<CompletionResponse<MistralResponse>, rig::completion::CompletionError> {
+    ) -> Result<CompletionResponse<MistralResponse>, CompletionError> {
         let mut messages = Vec::new();
 
         // Add system message if preamble exists
@@ -103,30 +111,33 @@ impl CompletionModel for MistralCompletionModel {
             }));
         }
 
-        // Add chat history
-        for msg in &request.chat_history {
-            messages.push(json!({
-                "role": msg.role,
-                "content": msg.content
-            }));
-        }
-
         // Add user prompt
+        let prompt_text = match &request.prompt {
+            Message::User { content } => content.iter()
+                .map(|c| match c {
+                    UserContent::Text(text) => text.text.clone(),
+                    _ => String::new(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => String::new(),
+        };
+
         messages.push(json!({
             "role": "user",
-            "content": request.prompt_with_context()
+            "content": prompt_text
         }));
 
         let body = json!({
             "model": self.model,
             "messages": messages,
             "temperature": request.temperature.unwrap_or(0.7),
+            "max_tokens": request.max_tokens.unwrap_or(2000)
         });
 
-        let url = format!("{}/chat/completions", self.client.base_url);
         let resp = self.client
             .http_client
-            .post(url)
+            .post(&format!("{}/chat/completions", self.client.base_url))
             .bearer_auth(&self.client.api_key)
             .json(&body)
             .send()
@@ -135,7 +146,7 @@ impl CompletionModel for MistralCompletionModel {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(rig::completion::CompletionError::ProviderError(
+            return Err(CompletionError::ProviderError(
                 format!("Mistral API call failed: {status} - {text}")
             ));
         }
@@ -146,9 +157,9 @@ impl CompletionModel for MistralCompletionModel {
 }
 
 impl rig::completion::Prompt for MistralCompletionModel {
-    async fn prompt(&self, prompt: &str) -> Result<String, PromptError> {
+    async fn prompt(&self, prompt: impl Into<Message> + Send) -> Result<String, PromptError> {
         let request = CompletionRequest {
-            prompt: prompt.to_string(),
+            prompt: prompt.into(),
             preamble: None,
             chat_history: vec![],
             documents: vec![],
@@ -161,11 +172,11 @@ impl rig::completion::Prompt for MistralCompletionModel {
         let response = self.completion(request).await
             .map_err(PromptError::from)?;
             
-        match response.choice {
-            ModelChoice::Message(content) => Ok(content),
+        match response.choice.iter().next() {
+            Some(AssistantContent::Text(text)) => Ok(text.text.clone()),
             _ => Err(PromptError::from(CompletionError::ResponseError(
-                "Unexpected response type".into()
+                "Unexpected response format".into()
             ))),
         }
     }
-} 
+}

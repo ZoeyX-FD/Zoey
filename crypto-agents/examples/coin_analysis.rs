@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
     let coins = vec![
         ("BERA", "berachain-bera"),
         ("PLUME", "plume"),
-        ("TAO", "bittensor"),
+        ("ARC", "ai-rig-complex"),
     ];
     
     for (symbol, id) in coins {

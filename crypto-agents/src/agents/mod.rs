@@ -35,6 +35,15 @@ pub const DEEPSEEK_MODELS: &[&str] = &[
     "deepseek-reasoner",
 ];
 
+pub const OPENROUTER_MODELS: &[&str] = &[
+    "anthropic/claude-2",
+    "google/gemini-2.0-flash-001",
+    "mistralai/mistral-nemo",
+    "deepseek/deepseek-r1",
+    "minimax/minimax-01",
+    "qwen/qwen2.5-vl-72b-instruct",
+];
+
 #[derive(Debug, Clone, Copy)]
 pub enum ModelProvider {
     DeepSeek,
@@ -78,6 +87,14 @@ impl ModelProvider {
             Self::Cohere => "cohere",
             Self::OpenRouter => "openrouter",
         }.to_string()
+    }
+
+    pub fn available_models(&self) -> Vec<&str> {
+        match self {
+            Self::DeepSeek => DEEPSEEK_MODELS.to_vec(),
+            Self::OpenRouter => OPENROUTER_MODELS.to_vec(),
+            _ => vec![self.default_model()],
+        }
     }
 }
 
@@ -239,32 +256,32 @@ impl BaseAgent {
             ModelProvider::DeepSeek => {
                 let agent = self.deepseek_agent.as_ref()
                     .ok_or_else(|| AgentError::ApiError("DeepSeek agent not initialized".to_string()))?;
-                agent.prompt(&full_prompt).await
+                agent.prompt(full_prompt.to_owned()).await
             },
             ModelProvider::Gemini => {
                 let agent = self.gemini_agent.as_ref()
                     .ok_or_else(|| AgentError::ApiError("Gemini agent not initialized".to_string()))?;
-                agent.prompt(&full_prompt).await
+                agent.prompt(full_prompt.to_owned()).await
             },
             ModelProvider::Mistral => {
                 let agent = self.mistral_agent.as_ref()
                     .ok_or_else(|| AgentError::ApiError("Mistral agent not initialized".to_string()))?;
-                agent.prompt(&full_prompt).await
+                agent.prompt(full_prompt.to_owned()).await
             },
             ModelProvider::OpenAI => {
                 let agent = self.openai_agent.as_ref()
                     .ok_or_else(|| AgentError::ApiError("OpenAI agent not initialized".to_string()))?;
-                agent.prompt(&full_prompt).await
+                agent.prompt(full_prompt.to_owned()).await
             },
             ModelProvider::Cohere => {
                 let agent = self.cohere_agent.as_ref()
                     .ok_or_else(|| AgentError::ApiError("Cohere agent not initialized".to_string()))?;
-                agent.prompt(&full_prompt).await
+                agent.prompt(full_prompt.to_owned()).await
             },
             ModelProvider::OpenRouter => {
                 let agent = self.openrouter_agent.as_ref()
                     .ok_or_else(|| AgentError::ApiError("OpenRouter agent not initialized".to_string()))?;
-                agent.prompt(&full_prompt).await
+                agent.prompt(full_prompt.to_owned()).await
             },
         };
 

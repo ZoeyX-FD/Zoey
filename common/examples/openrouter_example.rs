@@ -1,6 +1,6 @@
 use anyhow::Result;
 use common::providers::openrouter::Client;
-use rig::completion::{CompletionModel, CompletionRequest, Chat, ModelChoice};
+use rig::completion::{CompletionModel, CompletionRequest, Chat, Message, AssistantContent};
 
 
 #[tokio::main]
@@ -11,7 +11,7 @@ async fn main() -> Result<()> {
     // Example 1: Simple prompt with Claude
     let claude = client.completion_model("anthropic/claude-2");
     let request = CompletionRequest {
-        prompt: "What is the capital of France?".to_string(),
+        prompt: Message::user("What is the capital of France?"),
         preamble: None,
         chat_history: vec![],
         documents: vec![],
@@ -21,14 +21,14 @@ async fn main() -> Result<()> {
         additional_params: None,
     };
     let response = claude.completion(request).await?;
-    if let ModelChoice::Message(content) = response.choice {
-        println!("Claude's response: {}", content);
+    if let Some(AssistantContent::Text(text)) = response.choice.iter().next() {
+        println!("Claude's response: {}", text.text);
     }
 
     // Example 2: Chat completion with GPT-4
     let gpt4 = client.completion_model("openai/gpt-4o-mini");
     let request = CompletionRequest {
-        prompt: "Explain quantum computing".to_string(),
+        prompt: Message::user("Explain quantum computing"),
         preamble: Some("You are a helpful physics professor.".to_string()),
         chat_history: vec![],
         documents: vec![],
@@ -38,8 +38,8 @@ async fn main() -> Result<()> {
         additional_params: None,
     };
     let response = gpt4.completion(request).await?;
-    if let ModelChoice::Message(content) = response.choice {
-        println!("GPT-4's response: {}", content);
+    if let Some(AssistantContent::Text(text)) = response.choice.iter().next() {
+        println!("GPT-4's response: {}", text.text);
     }
 
     // Example 3: Using different models
@@ -54,7 +54,7 @@ async fn main() -> Result<()> {
     for model_name in models {
         let model = client.completion_model(model_name);
         let request = CompletionRequest {
-            prompt: "Write a haiku about programming".to_string(),
+            prompt: Message::user("Write a haiku about programming"),
             preamble: None,
             chat_history: vec![],
             documents: vec![],
@@ -65,8 +65,8 @@ async fn main() -> Result<()> {
         };
         match model.completion(request).await {
             Ok(response) => {
-                if let ModelChoice::Message(content) = response.choice {
-                    println!("{} response:\n{}\n", model_name, content);
+                if let Some(AssistantContent::Text(text)) = response.choice.iter().next() {
+                    println!("{} response:\n{}\n", model_name, text.text);
                 }
             },
             Err(e) => println!("Error with {}: {}", model_name, e),
@@ -79,7 +79,7 @@ async fn main() -> Result<()> {
         .build();
 
     let chat_history = vec![];  // Empty chat history
-    let response = agent.chat("Find me recent papers about rust programming language", chat_history).await?;
+    let response = agent.chat(Message::user("Find me recent papers about rust programming language"), chat_history).await?;
     println!("Agent response: {}", response);
 
     Ok(())

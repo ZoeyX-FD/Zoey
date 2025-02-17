@@ -3,9 +3,11 @@ members = [
     "zoey",      # Agent Research with doc and web intelligence
     "common",    # Shared functionality
     "crypto-agents", # Coingecko Research agent intelligence
+    "rig-onchain-kit"  # Onchain kit for blockchain interactions
 ]
 resolver = "2"
 
 [workspace.dependencies]
-rig-core = { path = "./rig-core", features = ["pdf", "derive"] }
-rig-sqlite = { path = "./rig-sqlite" }
+rig-core = { path = "./rig-core", version = "0.8.0", features = ["pdf", "derive"] }
+rig-sqlite = { path = "./rig-sqlite", version = "0.1.4" }
+rig-onchain-kit = { path = "./rig-onchain-kit" }

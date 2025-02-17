@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{Utc, Duration};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::collections::HashMap;
@@ -8,10 +8,10 @@ use std::collections::HashMap;
 use crate::models::{MarketData, Conversation};
 use crate::api::{
     coingecko::DetailedCoinData,
-    social_media::SocialMediaPost
+    social_media::SocialMediaPost,
 };
 use super::{Agent, BaseAgent, ModelProvider};
-use crate::models::AgentError;
+use common::exa::{ExaClient, ExaSearchParams, Contents, Highlights, Summary};
 
 const TOPIC_SYSTEM_PROMPT: &str = r#"
 You are a Market Topics Analysis AI specializing in cryptocurrency market analysis.
@@ -87,10 +87,14 @@ pub struct TopicAnalysis {
 pub struct TopicAgent {
     base: BaseAgent,
     analysis_history: HashMap<String, Vec<TopicAnalysis>>,
+    exa_client: Option<ExaClient>,
 }
 
 impl TopicAgent {
     pub async fn new(model: String, provider: ModelProvider) -> Result<Self> {
+        // Initialize Exa client if API key is available
+        let exa_client = std::env::var("EXA_API_KEY").ok().map(|key| ExaClient::new(&key));
+        
         Ok(Self {
             base: BaseAgent::new(
                 "Topic Analysis Agent".to_string(),
@@ -99,6 +103,7 @@ impl TopicAgent {
                 provider
             ).await?.with_temperature(0.7),
             analysis_history: HashMap::new(),
+            exa_client,
         })
     }
 
@@ -181,7 +186,7 @@ impl TopicAgent {
             timestamp: Utc::now().to_rfc3339(),
             sector: format!("{} Analysis", symbol),
             sentiment: self.calculate_combined_sentiment(&response, sentiment_data),
-            key_projects: self.extract_key_points(&response),
+            key_projects: self.extract_key_projects(&response),
             catalysts: self.extract_catalysts(&response),
             risks: self.extract_risks(&response),
             trading_implications: self.extract_trading_implications(&response),
@@ -230,12 +235,13 @@ impl TopicAgent {
 
     fn extract_key_projects(&self, text: &str) -> Vec<String> {
         let mut projects = Vec::new();
-        if let Some(section) = text.split("Key Projects:").nth(1) {
+        if let Some(section) = text.split("Key Market Themes:").nth(1) {
             if let Some(end) = section.find("\n\n") {
                 let lines = section[..end].lines();
                 for line in lines {
-                    if line.starts_with('-') {
-                        projects.push(line.trim_start_matches('-').trim().to_string());
+                    let line = line.trim();
+                    if line.starts_with('-') || line.starts_with('•') {
+                        projects.push(line.trim_start_matches(['-', '•', ' ']).to_string());
                     }
                 }
             }
@@ -249,8 +255,9 @@ impl TopicAgent {
             if let Some(end) = section.find("\n\n") {
                 let lines = section[..end].lines();
                 for line in lines {
-                    if !line.trim().is_empty() {
-                        catalysts.push(line.trim().to_string());
+                    let line = line.trim();
+                    if line.starts_with('-') || line.starts_with('•') {
+                        catalysts.push(line.trim_start_matches(['-', '•', ' ']).to_string());
                     }
                 }
             }
@@ -260,40 +267,29 @@ impl TopicAgent {
 
     fn extract_risks(&self, text: &str) -> Vec<String> {
         let mut risks = Vec::new();
-        if let Some(section) = text.split("Risk Assessment:").nth(1) {
-            let lines = section.lines();
-            for line in lines {
-                if !line.trim().is_empty() {
-                    risks.push(line.trim().to_string());
+        if let Some(section) = text.split("Risk Factors:").nth(1) {
+            if let Some(end) = section.find("\n\n") {
+                let lines = section[..end].lines();
+                for line in lines {
+                    let line = line.trim();
+                    if line.starts_with('-') || line.starts_with('•') {
+                        risks.push(line.trim_start_matches(['-', '•', ' ']).to_string());
+                    }
                 }
             }
         }
         risks
     }
 
-    fn extract_key_points(&self, text: &str) -> Vec<String> {
-        let mut points = Vec::new();
-        if let Some(section) = text.split("💡 Key Points:").nth(1) {
-            if let Some(end) = section.find("\n\n") {
-                let lines = section[..end].lines();
-                for line in lines {
-                    if !line.trim().is_empty() {
-                        points.push(line.trim().to_string());
-                    }
-                }
-            }
-        }
-        points
-    }
-
     fn extract_trading_implications(&self, text: &str) -> Vec<String> {
         let mut implications = Vec::new();
-        if let Some(section) = text.split("💡 Trading Implications:").nth(1) {
+        if let Some(section) = text.split("Trading Implications:").nth(1) {
             if let Some(end) = section.find("\n\n") {
                 let lines = section[..end].lines();
                 for line in lines {
-                    if !line.trim().is_empty() {
-                        implications.push(line.trim().to_string());
+                    let line = line.trim();
+                    if line.starts_with('-') || line.starts_with('•') {
+                        implications.push(line.trim_start_matches(['-', '•', ' ']).to_string());
                     }
                 }
             }
@@ -339,167 +335,257 @@ impl TopicAgent {
         output
     }
 
-    pub async fn analyze_topic(&self, context: &str) -> Result<TopicAnalysis> {
-        let prompt = format!(
-            r#"You are a Crypto Market Intelligence AI analyzing social media data and market trends.
-
-Analyze the following topic data and provide detailed insights:
-
-{context}
-
-Please provide a comprehensive analysis with at least 3 points in each section, even if the data is limited.
-Focus on:
-1. Current state and developments
-2. Market sentiment and community reaction
-3. Technical developments and innovations
-4. Future potential and opportunities
-5. Possible risks and challenges
-
-Format your response EXACTLY as follows:
-
-KEY INSIGHTS:
-- [Key insight about current state]
-- [Key insight about market dynamics]
-- [Key insight about notable developments]
-
-CURRENT TRENDS:
-- [Trend with supporting evidence]
-- [Trend with market impact]
-- [Trend with future implications]
-
-RISKS AND CHALLENGES:
-- [Risk with potential impact]
-- [Challenge facing adoption]
-- [Market-related concern]
-
-Keep insights specific, data-driven, and actionable. If data is limited, provide analysis based on broader market context and similar projects."#
-        );
-
-        let response = self.base.generate_response(&prompt, None).await?;
-        
-        // Parse sections
-        let key_projects = self.extract_section(&response, "KEY INSIGHTS:");
-        let catalysts = self.extract_section(&response, "CURRENT TRENDS:");
-        let risks = self.extract_section(&response, "RISKS AND CHALLENGES:");
-
-        // Ensure we have at least some content in each section
-        if key_projects.is_empty() || catalysts.is_empty() || risks.is_empty() {
-            return Err(AgentError::InvalidData("Incomplete analysis generated".to_string()).into());
-        }
-
-        Ok(TopicAnalysis {
-            timestamp: Utc::now().to_rfc3339(),
-            sector: "Custom Topic".to_string(),
-            sentiment: self.calculate_sector_sentiment(&response),
-            key_projects,
-            catalysts,
-            risks,
-            trading_implications: self.extract_trading_implications(&response),
-        })
-    }
-
-    // Helper method to extract sections
-    fn extract_section(&self, text: &str, section_header: &str) -> Vec<String> {
-        if let Some(section_start) = text.find(section_header) {
-            let section_text = &text[section_start..];
-            if let Some(section_end) = section_text.find('\n') {
-                return section_text[section_end..]
-                    .lines()
-                    .map(|line| line.trim())
-                    .filter(|line| line.starts_with('-'))
-                    .map(|line| line.trim_start_matches('-').trim().to_string())
-                    .filter(|line| !line.is_empty())
-                    .collect();
-            }
-        }
-        Vec::new()
-    }
-
     pub async fn analyze_market_topics(
         &self,
         market_data: &MarketData,
-        technical_analysis: &str,
-        sentiment_analysis: &str
+        _technical_analysis: &str,
     ) -> Result<String> {
-        println!("🔄 Processing market topics...");
+        let mut analysis = String::new();
+        
+        // Add market overview header
+        analysis.push_str(&format!(
+            "🌍 Market Topics Analysis ({})\n\n\
+             📊 Market Overview:\n\
+             • Total Market Cap: ${:.2}B\n\
+             • 24h Volume: ${:.2}B\n\
+             • Market Cap Change 24h: {:.2}%\n\n",
+            Utc::now().format("%Y-%m-%d %H:%M UTC"),
+            market_data.overview.total_market_cap / 1_000_000_000.0,
+            market_data.overview.total_volume / 1_000_000_000.0,
+            market_data.overview.market_cap_change_percentage_24h
+        ));
 
-        // Add shorter timeout and progress indicator
-        let timeout_duration = std::time::Duration::from_secs(15); // Reduced from 30s to 15s
+        if let Some(client) = &self.exa_client {
+            let contents = Contents {
+                text: true,
+                highlights: Some(Highlights {
+                    num_sentences: 3,
+                    highlights_per_result: 3,
+                }),
+                summary: Some(Summary {
+                    max_sentences: 5,
+                }),
+            };
 
-        // 1. Limit data size more aggressively
-        let market_summary = self.summarize_market_data(market_data);
-        // Take only first 500 chars of each analysis
-        let tech_summary = technical_analysis.chars().take(500).collect::<String>();
-        let sentiment_summary = sentiment_analysis.chars().take(500).collect::<String>();
+            let search_params = ExaSearchParams {
+                query: "cryptocurrency market latest news trends developments price analysis".to_string(),
+                num_results: 10,
+                include_domains: vec![
+                    "beincrypto.com".to_string(),
+                ],
+                start_date: Some(Utc::now() - Duration::hours(24)),
+                end_date: None,
+                contents: Some(contents),
+            };
 
-        let context = format!(
-            "Provide brief market analysis (max 3 points per section):\n\n\
-             Market Summary:\n{}\n\n\
-             Technical Summary:\n{}\n\n\
-             Sentiment Summary:\n{}\n\n",
-            market_summary,
-            tech_summary,
-            sentiment_summary
-        );
+            match client.search_crypto(search_params).await {
+                Ok(results) => {
+                    if !results.is_empty() {
+                        let mut content_for_analysis = String::new();
+                        let mut sources = Vec::new();
+                        
+                        for result in &results {
+                            // Store source information
+                            sources.push(format!(
+                                "• {} ({})\n  🔗 {}", 
+                                result.title,
+                                result.published_date
+                                    .map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string())
+                                    .unwrap_or_else(|| "Recent".to_string()),
+                                result.url
+                            ));
+                            
+                            // Prepare content for analysis
+                            content_for_analysis.push_str(&format!(
+                                "\n📰 {}\n",
+                                result.title
+                            ));
+                            
+                            if let Some(summary) = &result.summary {
+                                content_for_analysis.push_str(&format!("Summary: {}\n", summary));
+                            }
+                            
+                            if !result.highlights.is_empty() {
+                                content_for_analysis.push_str("Key Points:\n");
+                                for highlight in &result.highlights {
+                                    content_for_analysis.push_str(&format!("• {}\n", highlight));
+                                }
+                            }
+                        }
 
-        println!("⏳ Analyzing market context...");
-        println!("(Timeout set to 15 seconds)");
+                        let prompt = format!(
+                            "Analyze these recent market developments and provide a concise summary:\n\n{}\n\n\
+                             Format the analysis as:\n\
+                             1. Key Market Trends (3-4 points)\n\
+                             2. Important Developments (2-3 points)\n\
+                             3. Potential Market Impacts (2-3 points)",
+                            content_for_analysis
+                        );
 
-        // Add timeout with fallback
-        let analysis = match tokio::time::timeout(
-            timeout_duration,
-            self.analyze_topic(&context)
-        ).await {
-            Ok(result) => result?,
-            Err(_) => {
-                println!("⚠️ Analysis timed out, providing simplified response...");
-                return Ok(format!(
-                    "🌍 Market Overview\n\n\
-                     📊 Current State:\n• Market Cap: ${:.2}B\n• 24h Volume: ${:.2}B\n\n\
-                     ⚠️ Note: Detailed analysis timed out, showing basic metrics only.",
-                    market_data.overview.total_market_cap / 1e9,
-                    market_data.overview.total_volume / 1e9
-                ));
+                        if let Ok(ai_analysis) = self.base.generate_response(&prompt, None).await {
+                            analysis.push_str(&ai_analysis);
+                            
+                            // Add sources section at the end
+                            analysis.push_str("\n\n📚 Sources:\n");
+                            for source in sources {
+                                analysis.push_str(&format!("{}\n", source));
+                            }
+                        }
+                    } else {
+                        analysis.push_str("No recent market developments found.\n");
+                    }
+                }
+                Err(e) => {
+                    println!("⚠️ Error fetching market news: {}", e);
+                    analysis.push_str("Error fetching market developments.\n");
+                }
             }
-        };
+        } else {
+            analysis.push_str("Exa client not available for market analysis.\n");
+        }
 
-        // Simplified response format
-        Ok(format!(
-            "🌍 Quick Market Topics Analysis\n\n\
-             📊 Key Themes:\n{}\n\n\
-             🚀 Catalysts:\n{}\n\n\
-             ⚠️ Risks:\n{}\n",
-            analysis.key_projects.iter().take(3).map(|s| format!("• {}", s)).collect::<Vec<_>>().join("\n"),
-            analysis.catalysts.iter().take(3).map(|s| format!("• {}", s)).collect::<Vec<_>>().join("\n"),
-            analysis.risks.iter().take(3).map(|s| format!("• {}", s)).collect::<Vec<_>>().join("\n")
-        ))
+        Ok(analysis)
     }
 
-    // Helper to summarize market data
-    fn summarize_market_data(&self, data: &MarketData) -> String {
-        let overview = &data.overview;
-        let trending_coins = &data.trending;
+    // Dynamic prompt generation based on analysis type
+    fn generate_search_prompt(&self, analysis_type: &str, context: &str) -> ExaSearchParams {
+        let base_contents = Contents {
+            text: true,
+            highlights: Some(Highlights {
+                num_sentences: 3,
+                highlights_per_result: 3,
+            }),
+            summary: Some(Summary {
+                max_sentences: 5,
+            }),
+        };
 
-        // Format trending coins with proper string joining
-        let trending_list = trending_coins
-            .iter()
-            .take(3)
-            .map(|c| c.id.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
+        match analysis_type {
+            "news" => ExaSearchParams {
+                query: format!("cryptocurrency {} latest news developments", context),
+                num_results: 5,
+                include_domains: vec![
+                    "cointelegraph.com".to_string(),
+                    "coindesk.com".to_string(),
+                    "theblock.co".to_string(),
+                ],
+                start_date: Some(Utc::now() - Duration::days(7)),
+                end_date: None,
+                contents: Some(base_contents.clone()),
+            },
+            "technical" => ExaSearchParams {
+                query: format!("{} price analysis market prediction technical indicators", context),
+                num_results: 5,
+                include_domains: vec![
+                    "tradingview.com".to_string(),
+                    "investing.com".to_string(),
+                ],
+                start_date: Some(Utc::now() - Duration::days(2)),
+                end_date: None,
+                contents: Some(base_contents.clone()),
+            },
+            "sentiment" => ExaSearchParams {
+                query: format!("{} market sentiment social media community reaction", context),
+                num_results: 5,
+                include_domains: vec![
+                    "cointelegraph.com".to_string(),
+                    "coindesk.com".to_string(),
+                ],
+                start_date: Some(Utc::now() - Duration::days(1)),
+                end_date: None,
+                contents: Some(base_contents.clone()),
+            },
+            "development" => ExaSearchParams {
+                query: format!("{} development github updates progress technical", context),
+                num_results: 5,
+                include_domains: vec![
+                    "github.com".to_string(),
+                    "medium.com".to_string(),
+                ],
+                start_date: Some(Utc::now() - Duration::days(30)),
+                end_date: None,
+                contents: Some(base_contents.clone()),
+            },
+            _ => ExaSearchParams {
+                query: format!("cryptocurrency {} analysis", context),
+                num_results: 5,
+                include_domains: vec![
+                    "cointelegraph.com".to_string(),
+                    "coindesk.com".to_string(),
+                ],
+                start_date: Some(Utc::now() - Duration::days(7)),
+                end_date: None,
+                contents: Some(base_contents),
+            },
+        }
+    }
 
-        format!(
-            "Market Cap: ${:.2}B\n\
-             24h Volume: ${:.2}B\n\
-             24h Change: {:.2}%\n\
-             Top Trending: {}\n\
-             Market Sentiment: {}",
-            overview.total_market_cap / 1e9,
-            overview.total_volume / 1e9,
-            overview.market_cap_change_percentage_24h,
-            trending_list,
-            if overview.market_cap_change_percentage_24h > 0.0 { "Bullish 📈" } else { "Bearish 📉" }
-        )
+    async fn get_comprehensive_analysis(&self, symbol: &str) -> Result<String> {
+        if let Some(client) = &self.exa_client {
+            let analysis_types = vec!["news", "technical", "sentiment", "development"];
+            let mut all_results = Vec::new();
+
+            for analysis_type in analysis_types {
+                let params = self.generate_search_prompt(analysis_type, symbol);
+                match client.search_crypto(params).await {
+                    Ok(results) => {
+                        all_results.push((analysis_type, results));
+                    },
+                    Err(e) => {
+                        println!("⚠️ Error fetching {} data: {}", analysis_type, e);
+                    }
+                }
+            }
+
+            let mut context = String::new();
+            for (analysis_type, results) in all_results {
+                context.push_str(&format!("\n📊 {} Analysis:\n", analysis_type.to_uppercase()));
+                for result in results.iter().take(2) {
+                    let content = result.text.as_ref()
+                        .or(result.summary.as_ref())
+                        .map(|s| s.chars().take(200).collect::<String>())
+                        .unwrap_or_else(|| "No content available".to_string());
+                    
+                    context.push_str(&format!("• {}\n  {}\n  {}\n",
+                        result.title,
+                        result.published_date.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default(),
+                        content
+                    ));
+                }
+            }
+
+            Ok(context)
+        } else {
+            Ok("No data available - Exa client not initialized".to_string())
+        }
+    }
+
+    async fn analyze_with_news(&self, symbol: &str) -> Result<TopicAnalysis> {
+        // Get comprehensive analysis
+        let analysis_context = self.get_comprehensive_analysis(symbol).await?;
+
+        let mut context = String::new();
+        context.push_str(&analysis_context);
+
+        // Use this enriched context in your analysis
+        let prompt = format!(
+            "Analyze {} with the following market data and news:\n\n{}",
+            symbol, context
+        );
+
+        // Generate analysis using the enriched context
+        let response = self.base.generate_response(&prompt, None).await?;
+        
+        // Parse the response into TopicAnalysis
+        Ok(TopicAnalysis {
+            timestamp: Utc::now().to_rfc3339(),
+            sector: format!("{} Analysis", symbol),
+            sentiment: self.calculate_sector_sentiment(&response),
+            key_projects: self.extract_key_projects(&response),
+            catalysts: self.extract_catalysts(&response),
+            risks: self.extract_risks(&response),
+            trading_implications: self.extract_trading_implications(&response),
+        })
     }
 }
 
@@ -519,29 +605,46 @@ impl Agent for TopicAgent {
             "AI & ML Tokens",
             "Layer 1",
             "layer 2"
-           
         ];
 
         let mut full_analysis = String::new();
         
+        println!("🔍 Starting sector analysis with news integration...");
+        
         for sector in sectors {
-            match self.analyze_sector(sector, market_data).await {
+            match self.analyze_with_news(sector).await {
                 Ok(analysis) => {
                     full_analysis.push_str(&format!("\n\n🔍 {} Analysis:\n", sector));
                     full_analysis.push_str(&format!("Sentiment: {:.2}\n", analysis.sentiment));
-                    full_analysis.push_str("Key Projects:\n");
+                    
+                    // Get comprehensive news and market data
+                    if let Some(news_data) = self.get_comprehensive_analysis(sector).await.ok() {
+                        full_analysis.push_str("\n📰 Latest Market Context:\n");
+                        full_analysis.push_str(&news_data);
+                    }
+                    
+                    full_analysis.push_str("\nKey Projects:\n");
                     for project in analysis.key_projects {
                         full_analysis.push_str(&format!("- {}\n", project));
                     }
+                    
                     full_analysis.push_str("\nUpcoming Catalysts:\n");
                     for catalyst in analysis.catalysts {
                         full_analysis.push_str(&format!("- {}\n", catalyst));
+                    }
+                    
+                    full_analysis.push_str("\n💡 Trading Implications:\n");
+                    for implication in analysis.trading_implications {
+                        full_analysis.push_str(&format!("- {}\n", implication));
                     }
                 }
                 Err(e) => {
                     full_analysis.push_str(&format!("\n⚠️ Error analyzing {}: {}\n", sector, e));
                 }
             }
+            
+            // Add delay between sector analyses
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
         }
 
         // Save to memory

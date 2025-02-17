@@ -7,9 +7,11 @@ use rig::{
 use rig_sqlite::{Column, ColumnValue, SqliteVectorStore, SqliteVectorStoreTable};
 use tokio_rusqlite::Connection;
 use uuid;
+use tracing::info;
+use serde::{Serialize, Deserialize};
 
 // Document struct for storing loaded content
-#[derive(Debug, Clone, Embed)]
+#[derive(Debug, Clone, Embed, Serialize, Deserialize)]
 pub struct Document {
     pub id: String,
     pub source: String,
@@ -77,11 +79,13 @@ impl StorageManager {
         let docs = self.get_documents().await?;
         if !docs.is_empty() {
             if let Some(store) = &self.store {
+                let docs_count = docs.len(); // Store count before moving docs
                 let embeddings = rig::embeddings::EmbeddingsBuilder::new(embedding_model)
                     .documents(docs)?
                     .build()
                     .await?;
                 store.add_rows(embeddings).await?;
+                info!("Loaded {} existing documents into vector store", docs_count);
             }
         }
         
@@ -90,7 +94,7 @@ impl StorageManager {
 
     pub async fn add_document(&self, source: &str, content: &str) -> Result<Document> {
         let now = chrono::Local::now();
-        let uuid = uuid::Uuid::new_v4().to_string(); // Generate unique ID
+        let uuid = uuid::Uuid::new_v4().to_string();
         let doc = Document {
             id: format!("doc_{}_{}", now.timestamp(), uuid),
             source: source.to_string(),
@@ -106,20 +110,37 @@ impl StorageManager {
 
         // Insert into database
         self.conn.call(move |conn| {
-            conn.execute(
-                "INSERT OR IGNORE INTO documents (id, source, timestamp, content) VALUES (?1, ?2, ?3, ?4)",
+            // Start a transaction
+            let tx = conn.transaction()?;
+            
+            // Delete any existing document with same source to avoid duplicates
+            tx.execute(
+                "DELETE FROM documents WHERE source = ?1",
+                [&source],
+            )?;
+            
+            // Insert new document
+            tx.execute(
+                "INSERT INTO documents (id, source, timestamp, content) VALUES (?1, ?2, ?3, ?4)",
                 [&id, &source, &timestamp, &content],
             )?;
+            
+            // Commit transaction
+            tx.commit()?;
             Ok(())
         }).await?;
 
         // Add to vector store
         if let (Some(store), Some(model)) = (&self.store, &self.model) {
+            info!("Generating embeddings for document: {}", doc.source);
             let embeddings = rig::embeddings::EmbeddingsBuilder::new(model.clone())
                 .documents(vec![doc.clone()])?
                 .build()
                 .await?;
+            
+            info!("Adding document embeddings to vector store");
             store.add_rows(embeddings).await?;
+            info!("Successfully added document embeddings");
         }
 
         Ok(doc)
@@ -148,11 +169,21 @@ impl StorageManager {
     }
 
     pub async fn clear_documents(&self) -> Result<()> {
+        // Clear documents table first
         self.conn.call(|conn| {
-            conn.execute("DELETE FROM documents", [])?;
-            conn.execute("DELETE FROM documents_embeddings", [])?;
+            // Start transaction
+            let tx = conn.transaction()?;
+            
+            // Clear both tables
+            tx.execute("DELETE FROM documents", [])?;
+            tx.execute("DELETE FROM documents_embeddings", [])?;
+            
+            // Commit changes
+            tx.commit()?;
             Ok(())
         }).await?;
+        
+        info!("Cleared all documents and embeddings");
         Ok(())
     }
 
@@ -174,15 +205,61 @@ impl StorageManager {
             )?;
 
             // Create embeddings table with vector search support
-            // Note: vec0 extension automatically adds rowid and distance columns
-            // Using 1024 dimensions for Cohere's model
             conn.execute(
-                "CREATE VIRTUAL TABLE documents_embeddings USING vec0(embedding FLOAT[1024])",
+                "CREATE VIRTUAL TABLE documents_embeddings USING vec0(
+                    embedding FLOAT[1024]
+                )",
                 [],
             )?;
 
             Ok(())
         }).await?;
         Ok(())
+    }
+
+    pub async fn initialize_store_with_mode(&mut self, embedding_model: cohere::EmbeddingModel, persistent: bool) -> Result<()> {
+        let store = SqliteVectorStore::new(self.conn.clone(), &embedding_model).await?;
+        self.store = Some(store);
+        self.model = Some(embedding_model.clone());
+        
+        if persistent {
+            // Load existing documents into vector store
+            info!("Loading existing documents from persistent storage...");
+            let docs = self.get_documents().await?;
+            if !docs.is_empty() {
+                info!("Found {} existing documents", docs.len());
+                if let Some(store) = &self.store {
+                    let docs_count = docs.len(); // Store count before moving docs
+                    let embeddings = rig::embeddings::EmbeddingsBuilder::new(embedding_model)
+                        .documents(docs)?
+                        .build()
+                        .await?;
+                    store.add_rows(embeddings).await?;
+                    info!("Restored {} documents from persistent storage", docs_count);
+                }
+            }
+        } else {
+            // Clear any existing documents for fresh session
+            info!("Starting fresh session, clearing existing documents...");
+            self.clear_documents().await?;
+        }
+        
+        Ok(())
+    }
+
+    pub async fn new_with_mode(persistent: bool) -> Result<Self> {
+        // Use in-memory database for non-persistent mode
+        let db_path = if persistent {
+            "zoey.db".to_string()
+        } else {
+            ":memory:".to_string()  // SQLite in-memory database
+        };
+        
+        let conn = Connection::open(&db_path).await?;
+        Ok(Self {
+            conn,
+            store: None,
+            model: None,
+        })
     }
 } 

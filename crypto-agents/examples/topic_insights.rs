@@ -66,10 +66,7 @@ async fn main() -> Result<()> {
     let social = SocialMediaClient::new().await?;
 
     let topics = vec![
-        "artificial intelligence",
-        "agent ai",
-        "TAO",
-        "bittensor",
+        "AI Crypto",
     ];
 
     let mut reports = Vec::new();

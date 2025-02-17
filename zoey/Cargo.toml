@@ -17,6 +17,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 chrono = "0.4.39"
 async-trait = "0.1"
+sanitize-filename = "0.5"
 
 rig-core = { workspace = true }
 rig-sqlite = { workspace = true }

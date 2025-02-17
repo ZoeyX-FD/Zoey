@@ -12,7 +12,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let openai_client =
         openai::Client::new(&env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY not set"));
 
-    let model = openai_client.completion_model(GPT_4O);
+    let model = openai_client.completion_model("gpt-4o-mini");
 
     // Load in all the rust examples
     let examples = FileLoader::with_glob("rig-core/examples/*.rs")?

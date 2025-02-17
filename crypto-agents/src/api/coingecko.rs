@@ -13,7 +13,7 @@ use std::time::Instant;
 const BASE_URL: &str = "https://api.coingecko.com/api/v3";
 const BASE_DELAY: u64 = 3;  // Increase base delay to 3 seconds
 const REQUEST_DELAY: u64 = 3;     // Delay between requests
-const MAX_RETRIES: u32 = 2;
+const MAX_RETRIES: u32 = 3;
 const DEMO_API_KEY: &str = "CG-mVrwoy4JYveQ5MvX2Z2jbsyn";
 
 // Add this attribute to hide dead code warnings
@@ -652,17 +652,16 @@ impl CoinGeckoClient {
         Ok(candles)
     }
 
-    pub async fn get_market_chart(&self, coin_id: &str, days: u32) -> Result<TechnicalData> {
+    pub async fn get_market_chart(&self, coin_id: &str, _days: u32) -> Result<TechnicalData> {
         println!("📈 Fetching market data for {}", coin_id);
         
-        // Get OHLC data
-        let candles = self.get_ohlc_data(coin_id, days.into()).await?;
+        // Get historical price data for MA calculations
+        let historical = self.get_historical_data(coin_id, 200).await?;
         
-        if candles.is_empty() {
-            return Err(anyhow::anyhow!("No OHLC data available"));
-        }
-
-        // Get price and volume data from simple/price endpoint
+        // Get OHLC data for shorter timeframe analysis
+        let candles = self.get_ohlc_data(coin_id, 1).await?;
+        
+        // Get current price data
         let price_url = format!("{}/simple/price", BASE_URL);
         let price_params = [
             ("ids", coin_id),
@@ -685,10 +684,13 @@ impl CoinGeckoClient {
             .as_f64()
             .unwrap_or(0.0);
         
-        // Calculate indicators
+        // Calculate RSI using OHLC data
         let rsi_14 = self.calculate_rsi(&candles, 14);
-        let ma_50 = self.calculate_ma_from_candles(&candles, 50);
-        let ma_200 = self.calculate_ma_from_candles(&candles, 200);
+        
+        // Calculate MAs using historical price data
+        let ma_50 = self.calculate_ma_from_prices(&historical.prices, 50);
+        let ma_200 = self.calculate_ma_from_prices(&historical.prices, 200);
+        
         let macd = self.calculate_macd(&candles);
         let bb = self.calculate_bollinger_bands(&candles);
         
@@ -712,8 +714,8 @@ impl CoinGeckoClient {
         Ok(TechnicalData {
             candles,
             rsi_14: Some(rsi_14),
-            ma_50: ma_50,
-            ma_200: ma_200,
+            ma_50,
+            ma_200,
             macd,
             bollinger_bands: bb,
             volume_24h: Some(volume_24h),
@@ -724,9 +726,22 @@ impl CoinGeckoClient {
 
     pub async fn get_ohlc_data(&self, coin_id: &str, days: u32) -> Result<Vec<CandleData>> {
         let url = format!("{}/coins/{}/ohlc", BASE_URL, coin_id);
-        let params = [("vs_currency", "usd"), ("days", &days.to_string())];
         
-        println!("📊 Fetching OHLC data...");
+        // Normalize days to allowed values: 1, 7, 14, 30, 90, 180, 365, max
+        let normalized_days = match days {
+            d if d <= 1 => "1",
+            d if d <= 7 => "7",
+            d if d <= 14 => "14",
+            d if d <= 30 => "30",
+            d if d <= 90 => "90",
+            d if d <= 180 => "180",
+            d if d <= 365 => "365",
+            _ => "max"
+        };
+        
+        let params = [("vs_currency", "usd"), ("days", normalized_days)];
+        
+        println!("📊 Fetching OHLC data for {} days...", normalized_days);
         let data = self.make_request(&url, &params).await?;
         
         // Parse OHLC data
@@ -987,19 +1002,36 @@ impl CoinGeckoClient {
         category_volumes: (f64, f64, f64, f64),
     ) -> GlobalTechnicalMetrics {
         let (ai_volume, l1_volume, l2_volume, rwa_volume) = category_volumes;
+
+        // Calculate BTC market cap using current price and circulating supply
+        let btc_price = btc_data.current_price.unwrap_or_else(|| btc_data.candles.last().map(|c| c.close).unwrap_or(0.0));
+        let btc_supply = 19_600_000.0; // Current approximate circulating supply
+        let btc_mcap = btc_price * btc_supply;
+        
+        // Calculate BTC dominance dynamically
         let total_mcap = global.total_market_cap;
+        let btc_dominance = if total_mcap > 0.0 {
+            (btc_mcap / total_mcap) * 100.0
+        } else {
+            0.0
+        };
+
+        // Calculate other asset dominances using the same total market cap
+        let eth_dominance = if total_mcap > 0.0 { 
+            (eth_data.current_price.unwrap_or_else(|| eth_data.candles.last().map(|c| c.close).unwrap_or(0.0)) 
+            * 120_000_000.0 / total_mcap) * 100.0 
+        } else { 0.0 };
+        
+        let sol_dominance = if total_mcap > 0.0 { 
+            (sol_data.current_price.unwrap_or_else(|| sol_data.candles.last().map(|c| c.close).unwrap_or(0.0)) 
+            * 410_000_000.0 / total_mcap) * 100.0 
+        } else { 0.0 };
 
         GlobalTechnicalMetrics {
             total_market_cap: total_mcap,
-            btc_dominance: (btc_data.candles.last()
-                .map(|c| c.close * 19_000_000.0)
-                .unwrap_or(0.0) / total_mcap) * 100.0,
-            eth_dominance: (eth_data.candles.last()
-                .map(|c| c.close * 120_000_000.0)
-                .unwrap_or(0.0) / total_mcap) * 100.0,
-            sol_dominance: (sol_data.candles.last()
-                .map(|c| c.close * 410_000_000.0)
-                .unwrap_or(0.0) / total_mcap) * 100.0,
+            btc_dominance,
+            eth_dominance,
+            sol_dominance,
             total_volume_24h: global.total_volume,
             market_cap_change_24h: global.market_cap_change_percentage_24h,
             volume_change_24h: self.calculate_volume_change(&[btc_data, eth_data, sol_data]),

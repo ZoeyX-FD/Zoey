@@ -1,10 +1,8 @@
 use anyhow::Result;
-use common::providers::{MistralClient, MISTRAL_LARGE};
+use common::providers::mistral::Client;
 use dotenv::dotenv;
-use serde_json::json;
-use rig::completion::Prompt;
+use rig::completion::{Message, Prompt};
 use rig::agent::Agent;
-
 
 const TRADING_AGENT_PROMPT: &str = r#"
 You are an expert cryptocurrency trading analyst. Your role is to analyze market data and provide clear, actionable trading insights.
@@ -34,32 +32,32 @@ struct TradingAgent {
 }
 
 impl TradingAgent {
-    pub fn new(client: MistralClient) -> Self {
-        let agent = client.agent(MISTRAL_LARGE)
-            .temperature(0.7)
-            .max_tokens(2000)
+    fn new(api_key: &str) -> Result<Self> {
+        let client = Client::new(api_key);
+        let agent = client.agent("mistral-large-latest")
             .preamble(TRADING_AGENT_PROMPT)
+            .temperature(0.7)
             .build();
             
-        Self { agent }
+        Ok(Self { agent })
     }
     
-    pub async fn analyze_market(&self, market_data: serde_json::Value) -> Result<String> {
+    async fn analyze_market(&self, price: f64, volume: f64) -> Result<String> {
         let prompt = format!(
-            "Please analyze this market data and provide trading recommendations:\n{}",
-            serde_json::to_string_pretty(&market_data)?
+            "Current BTC price: ${:.2}\nTrading volume: ${:.2}\nWhat's your analysis?",
+            price, volume
         );
         
-        Ok(self.agent.prompt(&prompt).await?)
+        Ok(self.agent.prompt(Message::user(prompt)).await?)
     }
     
-    pub async fn get_trading_advice(&self, symbol: &str, timeframe: &str) -> Result<String> {
+    async fn suggest_trade(&self, analysis: &str) -> Result<String> {
         let prompt = format!(
-            "Please provide trading advice for {} on the {} timeframe. Include entry points, exit targets, and risk management.",
-            symbol, timeframe
+            "Based on this analysis:\n{}\n\nWhat trade would you suggest?",
+            analysis
         );
         
-        Ok(self.agent.prompt(&prompt).await?)
+        Ok(self.agent.prompt(Message::user(prompt)).await?)
     }
 }
 
@@ -71,38 +69,19 @@ async fn main() -> Result<()> {
     println!("🤖 Mistral Trading Agent Example");
     println!("================================\n");
 
-    // Initialize Mistral client and create trading agent
-    let client = MistralClient::from_env()?;
-    let trading_agent = TradingAgent::new(client);
+    let api_key = std::env::var("MISTRAL_API_KEY")
+        .expect("MISTRAL_API_KEY must be set");
+        
+    let agent = TradingAgent::new(&api_key)?;
     
-    // Example 1: Analyze market data
-    println!("📊 Market Analysis Example");
-    println!("-------------------------");
+    let price = 65000.0;
+    let volume = 1_500_000_000.0;
     
-    let market_data = json!({
-        "bitcoin": {
-            "price": 65000.0,
-            "24h_change": 2.5,
-            "volume": 28_000_000_000_i64,
-            "market_cap": 1_200_000_000_000_i64
-        },
-        "market_sentiment": "bullish",
-        "fear_greed_index": 75
-    });
+    let analysis = agent.analyze_market(price, volume).await?;
+    println!("Market Analysis:\n{}\n", analysis);
     
-    match trading_agent.analyze_market(market_data).await {
-        Ok(analysis) => println!("{}", analysis),
-        Err(e) => println!("❌ Error: {}", e),
-    }
-    
-    // Example 2: Get trading advice
-    println!("\n💡 Trading Advice Example");
-    println!("------------------------");
-    
-    match trading_agent.get_trading_advice("BTC/USD", "4h").await {
-        Ok(advice) => println!("{}", advice),
-        Err(e) => println!("❌ Error: {}", e),
-    }
+    let suggestion = agent.suggest_trade(&analysis).await?;
+    println!("Trade Suggestion:\n{}", suggestion);
     
     Ok(())
 } 
