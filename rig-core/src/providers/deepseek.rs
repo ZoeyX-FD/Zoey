@@ -419,19 +419,17 @@ impl CompletionModel for DeepSeekCompletionModel {
         let response = self
             .client
             .post("/chat/completions")
-            .json(
-                &if let Some(params) = completion_request.additional_params {
-                    json_utils::merge(request, params)
-                } else {
-                    request
-                },
-            )
+            .json(&if let Some(params) = completion_request.additional_params {
+                json_utils::merge(request, params)
+            } else {
+                request
+            })
             .send()
             .await?;
 
         if response.status().is_success() {
             let t = response.text().await?;
-            tracing::debug!(target: "rig", "OpenAI completion error: {}", t);
+            tracing::debug!(target: "rig", "DeepSeek completion response: {}", t);
 
             match serde_json::from_str::<ApiResponse<CompletionResponse>>(&t)? {
                 ApiResponse::Ok(response) => response.try_into(),
@@ -510,7 +508,7 @@ mod tests {
                     "index": 0,
                     "message": {
                         "role": "assistant",
-                        "content": "Why don’t skeletons fight each other?  \nBecause they don’t have the guts! 😄"
+                        "content": "Why don't skeletons fight each other?  \nBecause they don't have the guts! 😄"
                     },
                     "logprobs": null,
                     "finish_reason": "stop"
@@ -536,7 +534,7 @@ mod tests {
             Ok(response) => match &response.choices.first().unwrap().message {
                 Message::Assistant { content, .. } => assert_eq!(
                     content,
-                    "Why don’t skeletons fight each other?  \nBecause they don’t have the guts! 😄"
+                    "Why don't skeletons fight each other?  \nBecause they don't have the guts! 😄"
                 ),
                 _ => panic!("Expected assistant message"),
             },

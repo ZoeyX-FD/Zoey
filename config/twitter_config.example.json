@@ -1,0 +1,52 @@
+{
+    "enabled": true,
+    "max_tweet_length": 280,
+    "max_history_tweets": 5,
+    "home_timeline_fetch_count": 1,
+    "mentions_fetch_count": 3,
+
+    "search_queries": [
+        {
+            "query": "cooking AND (recipe OR chef OR food) lang:en",
+            "max_results": 3,
+            "interval_minutes": 120,
+            "enable": true
+        },
+        {
+            "query": "food science lang:en",
+            "max_results": 3,
+            "interval_minutes": 120,
+            "enable": true
+        }
+    ],
+
+    "topic_timelines": [
+        {
+            "topic_id": "825047592286871552",
+            "topic_name": "Food & Dining",
+            "max_results": 3,
+            "interval_minutes": 120,
+            "enable": true
+        }
+    ],
+
+    "search_languages": ["en"],
+    "exclude_retweets": true,
+    "exclude_replies": true,
+    "min_likes": 10,
+    "min_retweets": 3,
+
+    "min_action_interval": 300,
+    "max_action_interval": 900,
+    "min_task_interval": 1800,
+    "max_task_interval": 3600,
+
+    "enable_likes": true,
+    "enable_retweets": true,
+    "enable_quotes": true,
+    "enable_replies": true,
+
+    "max_tweets_per_hour": 2,
+    "max_likes_per_hour": 5,
+    "max_retweets_per_hour": 3
+} 

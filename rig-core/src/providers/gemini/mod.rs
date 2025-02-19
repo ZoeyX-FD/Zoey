@@ -17,6 +17,9 @@ pub use client::Client;
 // Re-export the embedding constants
 pub use embedding::{EMBEDDING_001, EMBEDDING_004};
 
+// Re-export completion constants
+pub use completion::{GEMINI_1_5_FLASH, GEMINI_1_5_PRO, GEMINI_1_5_PRO_8B, GEMINI_1_0_PRO, GEMINI_2_0_FLASH, GEMINI_2_0_FLASH_LITE, GEMINI_2_0_PRO_EXP};
+
 pub mod gemini_api_types {
     use serde::{Deserialize, Serialize};
 

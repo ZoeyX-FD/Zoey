@@ -14,6 +14,12 @@ pub const GEMINI_1_5_PRO_8B: &str = "gemini-1.5-pro-8b";
 /// `gemini-1.0-pro` completion model
 pub const GEMINI_1_0_PRO: &str = "gemini-1.0-pro";
 
+/// `gemini-2.0-flash-lite-preview-02-05` completion model
+pub const GEMINI_2_0_FLASH_LITE: &str = "gemini-2.0-flash-lite-preview-02-05";
+
+/// `gemini-2.0-pro-exp-02-05` completion model
+pub const GEMINI_2_0_PRO_EXP: &str = "gemini-2.0-pro-exp-02-05";
+
 use gemini_api_types::{
     Content, FunctionDeclaration, GenerateContentRequest, GenerateContentResponse,
     GenerationConfig, Part, Role, Tool,
