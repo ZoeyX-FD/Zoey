@@ -30,6 +30,22 @@ impl SwapTool {
         
         Self::new(&rpc_url, &private_key)
     }
+
+    pub async fn execute_swap(&self, from: String, to: String, amount: f64) -> Result<String, Box<dyn std::error::Error>> {
+        // Call the underlying swap implementation
+        let result = self.jupiter_swap
+            .swap(
+                Pubkey::from_str(&from)?,
+                Pubkey::from_str(&to)?,
+                (amount * 1e9) as u64, // Convert to lamports
+                4000,
+                None,
+            )
+            .await
+            .map_err(anyhow::Error::from)?;
+            
+        Ok(result)
+    }
 }
 
 impl Tool for SwapTool {

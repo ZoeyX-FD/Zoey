@@ -1,5 +1,15 @@
 use reqwest;
-use crate::gmgn::types::{TopHoldersResponse, HolderInfo, TokenInfoResponse, TokenInfo, WalletHoldingsResponse, WalletHoldingsData, SwapRankResponse};
+use crate::gmgn::types::{
+    TopHoldersResponse, 
+    HolderInfo, 
+    TokenInfoResponse, 
+    TokenInfo, 
+    WalletHoldingsResponse, 
+    WalletHoldingsData, 
+    SwapRankResponse, 
+    TokenPriceInfo, 
+    TokenDetailResponse
+};
 
 const BASE_URL: &str = "https://gmgn.mobi";
 pub struct GMGNClient {
@@ -46,13 +56,23 @@ impl GMGNClient {
         Ok(top_holders_response.data)
     }
 
-    pub async fn get_token_info(&self, contract_address: &str) -> Result<TokenInfo, reqwest::Error> {
-        let url = format!(
-            "{BASE_URL}/api/v1/token_info/sol/{contract_address}"
-        );
-        let response = self.client.get(url).send().await?;
-        let token_info_response: TokenInfoResponse = response.json().await?;
-        Ok(token_info_response.data)
+    pub async fn get_token_info(&self, token: &str) -> Result<TokenInfo, reqwest::Error> {
+        let url = format!("{BASE_URL}/api/v1/token_info/sol/{token}");
+        let response = self.client.get(&url).send().await?;
+        
+        if std::env::var("DEBUG").is_ok() {
+            let text = response.text().await?;
+            println!("\nRaw API Response:");
+            println!("{}", text);
+            
+            // We need to create a new request since we consumed the response
+            let response = self.client.get(&url).send().await?;
+            let token_info: TokenInfoResponse = response.json().await?;
+            Ok(token_info.data)
+        } else {
+            let token_info: TokenInfoResponse = response.json().await?;
+            Ok(token_info.data)
+        }
     }
 
     pub async fn get_wallet_holdings(
@@ -109,5 +129,92 @@ impl GMGNClient {
         swap_rank_response.data.rank.retain(|token| token.launchpad.as_deref() == Some(launchpad));
         
         Ok(swap_rank_response)
+    }
+
+    pub async fn get_token_price_info(&self, token: &str) -> Result<TokenPriceInfo, reqwest::Error> {
+        // Try multiple time periods to find the token
+        let time_periods = ["1h", "24h", "7d"];
+        let mut token_data = TokenPriceInfo::default();
+        let mut raw_response = String::new();
+        let debug_mode = std::env::var("DEBUG").is_ok();
+
+        for period in time_periods {
+            let url = format!("{BASE_URL}/defi/quotation/v1/rank/sol/swaps/{period}");
+            
+            let params = vec![
+                ("device_id", "ede3a881-1043-49aa-b645-b19080cb07da"),
+                ("client_id", "gmgn_web_2025.0220.193826"), 
+                ("from_app", "gmgn"),
+                ("app_ver", "2025.0220.193826"),
+                ("tz_name", "Asia/Bangkok"),
+                ("tz_offset", "25200"),
+                ("app_lang", "en"),
+                ("orderby", "swaps"),
+                ("direction", "desc"),
+                ("filters[]", "renounced"),
+                ("filters[]", "frozen"),
+                ("limit", "100")
+            ];
+
+            let response = self.client.get(&url)
+                .query(&params)
+                .send()
+                .await?;
+
+            let text = response.text().await?;
+            if debug_mode {
+                raw_response = text.clone();
+            }
+
+            if let Ok(rank_response) = serde_json::from_str::<SwapRankResponse>(&text) {
+                if let Some(t) = rank_response.data.rank.into_iter().find(|t| t.address == token) {
+                    token_data = TokenPriceInfo {
+                        price: Some(t.price),
+                        market_cap: Some(t.market_cap as f64),
+                        volume: Some(t.volume as f64),
+                        price_change_24h: None,
+                        price_change_1h: Some(t.price_change_percent),
+                        price_change_5m: Some(t.price_change_percent5m),
+                    };
+                    break;
+                }
+            }
+        }
+
+        // Try alternative endpoint if token not found
+        if token_data == TokenPriceInfo::default() {
+            let alt_url = format!("{BASE_URL}/defi/quotation/v1/tokens/detail/sol/{token}");
+            let response = self.client.get(&alt_url)
+                .query(&[
+                    ("device_id", "ede3a881-1043-49aa-b645-b19080cb07da"),
+                    ("client_id", "gmgn_web_2025.0220.193826")
+                ])
+                .send()
+                .await?;
+
+            let text = response.text().await?;
+            if debug_mode {
+                raw_response = text.clone();
+            }
+
+            if let Ok(detail_response) = serde_json::from_str::<TokenDetailResponse>(&text) {
+                token_data = TokenPriceInfo {
+                    price: detail_response.data.price,
+                    market_cap: detail_response.data.market_cap,
+                    volume: detail_response.data.volume_24h,
+                    price_change_24h: detail_response.data.price_change_24h,
+                    price_change_1h: detail_response.data.price_change_1h,
+                    price_change_5m: detail_response.data.price_change_5m,
+                };
+            }
+        }
+
+        // Only print raw response in debug mode
+        if debug_mode {
+            println!("\nRaw Price API Response:");
+            println!("{}", raw_response);
+        }
+        
+        Ok(token_data)
     }
 }

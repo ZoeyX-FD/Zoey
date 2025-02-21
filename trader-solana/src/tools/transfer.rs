@@ -28,6 +28,16 @@ impl TransferTool {
         
         Self::new(&rpc_url, &private_key)
     }
+
+    pub async fn execute_transfer(&self, to: String, amount: f64) -> Result<String, Box<dyn std::error::Error>> {
+        // Call the underlying transfer implementation
+        let result = self.solana
+            .transfer_sol(&to, amount)
+            .await
+            .map_err(anyhow::Error::from)?;
+            
+        Ok(result)
+    }
 }
 
 impl Tool for TransferTool {

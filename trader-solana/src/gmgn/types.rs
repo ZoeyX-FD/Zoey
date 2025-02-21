@@ -11,29 +11,46 @@ pub struct TopHoldersResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HolderInfo {
     pub address: String,
-    pub addr_type: i32,
-    pub amount_cur: f64,
-    pub usd_value: f64,
-    pub cost_cur: f64,
-    pub sell_amount_cur: f64,
-    pub sell_amount_percentage: f64,
-    pub sell_volume_cur: f64,
-    pub buy_volume_cur: f64,
-    pub buy_amount_cur: f64,
-    pub netflow_usd: f64,
-    pub netflow_amount: f64,
-    pub buy_tx_count_cur: i32,
-    pub sell_tx_count_cur: i32,
+    #[serde(default)]
+    pub addr_type: Option<i32>,
+    #[serde(default)]
+    pub amount_cur: Option<f64>,
+    #[serde(default)]
+    pub usd_value: Option<f64>,
+    #[serde(default)]
+    pub cost_cur: Option<f64>,
+    #[serde(default)]
+    pub sell_amount_cur: Option<f64>,
+    #[serde(default)]
+    pub sell_amount_percentage: Option<f64>,
+    #[serde(default)]
+    pub sell_volume_cur: Option<f64>,
+    #[serde(default)]
+    pub buy_volume_cur: Option<f64>,
+    #[serde(default)]
+    pub buy_amount_cur: Option<f64>,
+    #[serde(default)]
+    pub netflow_usd: Option<f64>,
+    #[serde(default)]
+    pub netflow_amount: Option<f64>,
+    #[serde(default)]
+    pub buy_tx_count_cur: Option<i32>,
+    #[serde(default)]
+    pub sell_tx_count_cur: Option<i32>,
     pub wallet_tag_v2: String,
     pub eth_balance: String,
     pub sol_balance: String,
     pub trx_balance: String,
     pub balance: String,
-    pub profit: f64,
-    pub realized_profit: f64,
-    pub unrealized_profit: f64,
+    #[serde(default)]
+    pub profit: Option<f64>,
+    #[serde(default)]
+    pub realized_profit: Option<f64>,
+    #[serde(default)]
+    pub unrealized_profit: Option<f64>,
     pub profit_change: Option<f64>,
-    pub amount_percentage: f64,
+    #[serde(default)]
+    pub amount_percentage: Option<f64>,
     pub avg_cost: Option<f64>,
     pub avg_sold: Option<f64>,
     #[serde(default)]
@@ -47,11 +64,15 @@ pub struct HolderInfo {
     pub tag_rank: HashMap<String, Option<i32>>,
     pub last_active_timestamp: Option<i64>,
     #[serde(default)]
-    pub created_at: i64,
-    pub accu_amount: f64,
-    pub accu_cost: f64,
-    pub cost: f64,
-    pub total_cost: f64,
+    pub created_at: Option<i64>,
+    #[serde(default)]
+    pub accu_amount: Option<f64>,
+    #[serde(default)]
+    pub accu_cost: Option<f64>,
+    #[serde(default)]
+    pub cost: Option<f64>,
+    #[serde(default)]
+    pub total_cost: Option<f64>,
     pub transfer_in: bool,
     pub is_new: bool,
     pub native_transfer: NativeTransfer,
@@ -62,32 +83,50 @@ pub struct HolderInfo {
 pub struct NativeTransfer {
     pub name: Option<String>,
     pub from_address: Option<String>,
-    pub timestamp: i64,
+    #[serde(default)]
+    pub timestamp: Option<i64>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct TokenInfoResponse {
+    #[serde(default)]
     pub code: i32,
+    #[serde(default)]
     pub reason: String,
+    #[serde(default)]
     pub message: String,
+    #[serde(default)]
     pub data: TokenInfo,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct TokenInfo {
-    pub address: String,
-    pub symbol: String,
-    pub name: String,
-    pub decimals: i32,
-    pub logo: String,
-    pub biggest_pool_address: String,
-    pub open_timestamp: i64,
-    pub holder_count: i32,
-    pub circulating_supply: String,
-    pub total_supply: String,
-    pub max_supply: String,
-    pub liquidity: String,
-    pub creation_timestamp: i64,
+    #[serde(default)]
+    pub address: Option<String>,
+    #[serde(default)]
+    pub symbol: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub decimals: Option<i32>,
+    #[serde(default)]
+    pub logo: Option<String>,
+    #[serde(default)]
+    pub biggest_pool_address: Option<String>,
+    #[serde(default)]
+    pub open_timestamp: Option<i64>,
+    #[serde(default)]
+    pub holder_count: Option<i32>,
+    #[serde(default)]
+    pub circulating_supply: Option<String>,
+    #[serde(default)]
+    pub total_supply: Option<String>,
+    #[serde(default)]
+    pub max_supply: Option<String>,
+    #[serde(default)]
+    pub liquidity: Option<String>,
+    #[serde(default)]
+    pub creation_timestamp: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -201,4 +240,81 @@ pub struct TokenRankInfo {
     pub smart_degen_count: u32,
     pub renowned_count: f64,
     pub is_wash_trading: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, PartialEq)]
+pub struct TokenPriceInfo {
+    #[serde(default)]
+    pub price: Option<f64>,
+    #[serde(default)]
+    pub market_cap: Option<f64>,
+    #[serde(default)]
+    pub volume: Option<f64>,
+    #[serde(default)]
+    pub price_change_24h: Option<f64>,
+    #[serde(default)]
+    pub price_change_1h: Option<f64>,
+    #[serde(default)]
+    pub price_change_5m: Option<f64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct TokenPriceResponse {
+    pub code: i32,
+    pub reason: String,
+    pub message: String,
+    pub data: TokenPriceInfo,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TokenDetailResponse {
+    pub code: i32,
+    pub reason: String,
+    pub message: String,
+    pub data: TokenDetailData,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TokenDetailData {
+    pub price: Option<f64>,
+    pub market_cap: Option<f64>,
+    pub volume_24h: Option<f64>,
+    pub price_change_24h: Option<f64>,
+    pub price_change_1h: Option<f64>,
+    pub price_change_5m: Option<f64>,
+    // Add other fields as needed
+}
+
+pub fn print_debug_info(info: &TokenInfo, price_info: Option<&TokenPriceInfo>, holders: &[HolderInfo]) {
+    println!("\n=== DEBUG INFO ===");
+    println!("Raw Token Data:");
+    println!("- Address: {:?}", info.address);
+    println!("- Symbol: {:?}", info.symbol);
+    println!("- Name: {:?}", info.name);
+    println!("- Decimals: {:?}", info.decimals);
+    println!("- Holder Count: {:?}", info.holder_count);
+    println!("- Liquidity: {:?}", info.liquidity);
+    println!("- Total Supply: {:?}", info.total_supply);
+    println!("- Circulating Supply: {:?}", info.circulating_supply);
+
+    if let Some(price) = price_info {
+        println!("\nRaw Price Data:");
+        println!("- Price: {:?}", price.price);
+        println!("- Market Cap: {:?}", price.market_cap);
+        println!("- Volume 24h: {:?}", price.volume);
+        println!("- Price Change 24h: {:?}", price.price_change_24h);
+        println!("- Price Change 1h: {:?}", price.price_change_1h);
+        println!("- Price Change 5m: {:?}", price.price_change_5m);
+    }
+
+    println!("\nRaw Holder Data:");
+    for (i, holder) in holders.iter().take(5).enumerate() {
+        println!("Holder {}: {{ address: {}, amount: {:?}, percentage: {:?} }}", 
+            i + 1, 
+            holder.address, 
+            holder.amount_cur, 
+            holder.amount_percentage
+        );
+    }
+    println!("================\n");
 }

@@ -2,11 +2,11 @@ use anyhow::Result;
 use clap::{command, Parser};
 use rig::{
     providers::deepseek::{self, Client as DeepseekClient},
-    completion::{CompletionModel, Prompt},
+    completion::{Prompt, Message},
 };
-use rina_solana::{
-    solana::{swap::JupiterSwap, transfer::SolanaTransfer},
+use trader_solana::{
     gmgn::client::GMGNClient,
+    gmgn::types::{TokenInfo, HolderInfo, TokenPriceInfo},
     tools::{swap::SwapTool, transfer::TransferTool},
 };
 use tracing::{info, error, debug};
@@ -15,16 +15,50 @@ use tracing::{info, error, debug};
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// DeepSeek API token
-    #[arg(long, env = "DEEPSEEK_API_KEY")]
+    #[clap(long, env = "DEEPSEEK_API_KEY")]
     deepseek_api_key: String,
 
     /// Solana RPC URL
-    #[arg(long, env = "SOLANA_RPC_URL")]
+    #[clap(long, env = "SOLANA_RPC_URL")]
     solana_rpc_url: String,
 
     /// Solana wallet private key
-    #[arg(long, env = "SOLANA_PRIVATE_KEY")]
+    #[clap(long, env = "SOLANA_PRIVATE_KEY")]
     solana_private_key: String,
+}
+
+fn print_debug_info(info: &TokenInfo, price_info: Option<&TokenPriceInfo>, holders: &[HolderInfo]) {
+    println!("\n=== DEBUG INFO ===");
+    println!("Raw Token Data:");
+    println!("- Address: {:?}", info.address);
+    println!("- Symbol: {:?}", info.symbol);
+    println!("- Name: {:?}", info.name);
+    println!("- Decimals: {:?}", info.decimals);
+    println!("- Holder Count: {:?}", info.holder_count);
+    println!("- Liquidity: {:?}", info.liquidity);
+    println!("- Total Supply: {:?}", info.total_supply);
+    println!("- Circulating Supply: {:?}", info.circulating_supply);
+
+    if let Some(price) = price_info {
+        println!("\nRaw Price Data:");
+        println!("- Price: {:?}", price.price);
+        println!("- Market Cap: {:?}", price.market_cap);
+        println!("- Volume 24h: {:?}", price.volume);
+        println!("- Price Change 24h: {:?}", price.price_change_24h);
+        println!("- Price Change 1h: {:?}", price.price_change_1h);
+        println!("- Price Change 5m: {:?}", price.price_change_5m);
+    }
+
+    println!("\nRaw Holder Data:");
+    for (i, holder) in holders.iter().take(5).enumerate() {
+        println!("Holder {}: {{ address: {}, amount: {:?}, percentage: {:?} }}", 
+            i + 1, 
+            holder.address, 
+            holder.amount_cur, 
+            holder.amount_percentage
+        );
+    }
+    println!("================\n");
 }
 
 #[tokio::main]
@@ -42,19 +76,51 @@ async fn main() -> Result<()> {
     // Create AI agent for trading decisions
     let trading_agent = deepseek
         .agent(deepseek::DEEPSEEK_CHAT)
-        .preamble(r#"You are an expert crypto trading assistant. 
+        .preamble(r#"You are an expert crypto trading assistant for ur creator, Zoey, your goal and mission is to make profit ,example make 0.1 sol to 1 sol profit/trade or 2% profit/trade - 100% profit/trade 
             Your role is to analyze market data and provide clear trading recommendations.
             Consider:
-            - Technical analysis
+            - Technical analysis / u can create a technical analysis based on the metrics provided
             - Market sentiment
             - Risk management
             - Current token metrics
+            - Holder distribution
+            - Liquidity metrics
+            - Supply metrics
+            - add your confident level from 10-100%
             
             Format responses as:
-            ANALYSIS: [brief market analysis]
-            ACTION: [SWAP/TRANSFER/HOLD]
+            ================================
+            ANALYSIS TIME: [current_datetime]
+            
+            TOKEN OVERVIEW:
+            - Name: [token name]
+            - Symbol: [token symbol]
+            
+            METRICS:
+            - Current Price: ${}
+            - Market Cap: ${}
+            - 24h Volume: ${}
+            - Price Changes:
+              • 24h: {}%
+              • 1h:  {}%
+              • 5m:  {}%
+            - Holders: [number of holders]
+            - Liquidity: [liquidity amount]
+            
+            ANALYSIS:
+            [detailed market analysis including:]
+            - Market sentiment
+            - Technical indicators 
+            - Risk factors
+            
+            ACTION: [SWAP/TRANSFER/HOLD/DONT BUY]
             DETAILS: [specific parameters for the action]
-            RISK: [risk assessment]"#)
+            
+            RISK ASSESSMENT:
+            - Risk Level: [LOW/MEDIUM/HIGH]
+            - Key Risks: [bullet points of main risks]
+            - Mitigation: [risk mitigation strategies]
+            ==============================="#)
         .build();
 
     // Initialize tools
@@ -81,6 +147,7 @@ async fn main() -> Result<()> {
                 println!("- swap <from> <to> <amount> : Swap tokens");
                 println!("- transfer <to_address> <amount> : Transfer tokens");
                 println!("- holders <token_address> : View top holders");
+                println!("- metrics <token_address> : View token metrics");
                 println!("- exit : Quit the program");
             },
 
@@ -88,21 +155,116 @@ async fn main() -> Result<()> {
                 let token = input.replace("analyze ", "");
                 debug!("Analyzing token: {}", token);
 
-                // Get token info from GMGN
-                match gmgn.get_token_info(&token).await {
-                    Ok(info) => {
-                        // Get market analysis from AI
+                // Get both token info and holder data
+                let token_info_future = gmgn.get_token_info(&token);
+                let price_info_future = gmgn.get_token_price_info(&token);
+                let holders_future = gmgn.get_top_holders(&token, Some(5), None, None, None);
+
+                // Run both requests concurrently
+                match tokio::try_join!(token_info_future, price_info_future, holders_future) {
+                    Ok((info, price_info, holders)) => {
+                        // Print debug info first
+                        if std::env::var("DEBUG").is_ok() {
+                            print_debug_info(&info, Some(&price_info), &holders);
+                        }
+
                         let prompt = format!(
-                            "Analyze this token:\nPrice: {}\nLiquidity: {}\nHolders: {}\nWhat action should be taken?",
-                            info.price, info.liquidity, info.holder_count
+                            r#"Analyze this token:
+                            ANALYSIS TIME: {}
+                            
+                            Basic Info:
+                            - Symbol: {}
+                            - Name: {}
+                            - Decimals: {}
+                            
+                            METRICS:
+                            - Current Price: ${}
+                            - Market Cap: ${}
+                            - 24h Volume: ${}
+                            - Price Changes:
+                              • 24h: {}%
+                              • 1h:  {}%
+                              • 5m:  {}%
+                            - Holders: {}
+                            - Liquidity: {}
+                            - Supply: [Circulating/Total supply not provided]
+                            
+                            Top 5 Holders:
+                            {}
+                            
+                            What action should be taken?"#,
+                            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                            info.symbol.as_deref().unwrap_or("Unknown"),
+                            info.name.as_deref().unwrap_or("Unknown"),
+                            info.decimals.map_or("Unknown".to_string(), |d| d.to_string()),
+                            price_info.price.map_or("Unknown".to_string(), |p| format!("{:.6}", p)),
+                            price_info.market_cap.map_or("Unknown".to_string(), |m| {
+                                if m >= 1_000_000_000.0 {
+                                    format!("{:.2}B", m / 1_000_000_000.0)
+                                } else if m >= 1_000_000.0 {
+                                    format!("{:.2}M", m / 1_000_000.0)
+                                } else {
+                                    format!("{:.2}", m)
+                                }
+                            }),
+                            price_info.volume.map_or("Unknown".to_string(), |v| {
+                                if v >= 1_000_000_000.0 {
+                                    format!("{:.2}B", v / 1_000_000_000.0)
+                                } else if v >= 1_000_000.0 {
+                                    format!("{:.2}M", v / 1_000_000.0)
+                                } else {
+                                    format!("{:.2}", v)
+                                }
+                            }),
+                            price_info.price_change_24h.map_or("Unknown".to_string(), |p| format!("{:+.2}", p)),
+                            price_info.price_change_1h.map_or("Unknown".to_string(), |p| format!("{:+.2}", p)),
+                            price_info.price_change_5m.map_or("Unknown".to_string(), |p| format!("{:+.2}", p)),
+                            info.holder_count.map_or("Unknown".to_string(), |h| h.to_string()),
+                            info.liquidity.as_deref().unwrap_or("Unknown"),
+                            holders.iter()
+                                .take(5)
+                                .map(|h| format!(
+                                    "- Address: {} ({}%)", 
+                                    h.address, 
+                                    h.amount_percentage.unwrap_or(0.0)
+                                ))
+                                .collect::<Vec<_>>()
+                                .join("\n")
                         );
                         
-                        match trading_agent.prompt(&prompt).await {
+                        match trading_agent.prompt(Message::from(prompt)).await {
                             Ok(analysis) => println!("{}", analysis),
-                            Err(e) => error!("AI analysis error: {}", e)
+                            Err(e) => {
+                                error!("AI analysis error: {}", e);
+                                println!("\nFallback Analysis:");
+                                println!("Token: {} ({})", 
+                                    info.name.as_deref().unwrap_or("Unknown"),
+                                    info.symbol.as_deref().unwrap_or("Unknown")
+                                );
+                                println!("Basic Metrics:");
+                                println!("- Price: ${}", price_info.price.map_or("Unknown".to_string(), |p| format!("{:.6}", p)));
+                                println!("- Market Cap: ${}", price_info.market_cap.map_or("Unknown".to_string(), |m| {
+                                    if m >= 1_000_000_000.0 {
+                                        format!("{:.2}B", m / 1_000_000_000.0)
+                                    } else if m >= 1_000_000.0 {
+                                        format!("{:.2}M", m / 1_000_000.0)
+                                    } else {
+                                        format!("{:.2}", m)
+                                    }
+                                }));
+                                println!("- Volume: ${}", price_info.volume.map_or("Unknown".to_string(), |v| {
+                                    if v >= 1_000_000_000.0 {
+                                        format!("{:.2}B", v / 1_000_000_000.0)
+                                    } else if v >= 1_000_000.0 {
+                                        format!("{:.2}M", v / 1_000_000.0)
+                                    } else {
+                                        format!("{:.2}", v)
+                                    }
+                                }));
+                            }
                         }
                     },
-                    Err(e) => error!("Failed to get token info: {}", e)
+                    Err(e) => error!("Failed to get token data: {}", e)
                 }
             },
 
@@ -114,8 +276,8 @@ async fn main() -> Result<()> {
                     let amount = parts[3];
                     
                     debug!("Initiating swap: {} {} -> {}", amount, from, to);
-                    match swap_tool.swap_tokens(from, to, amount.parse()?).await {
-                        Ok(tx) => println!("Swap successful! Tx: {}", tx),
+                    match swap_tool.execute_swap(from.to_string(), to.to_string(), amount.parse()?).await {
+                        Ok(_) => println!("Swap successful!"),
                         Err(e) => error!("Swap failed: {}", e)
                     }
                 } else {
@@ -130,8 +292,8 @@ async fn main() -> Result<()> {
                     let amount = parts[2];
                     
                     debug!("Initiating transfer: {} to {}", amount, to);
-                    match transfer_tool.transfer_sol(to, amount.parse()?).await {
-                        Ok(tx) => println!("Transfer successful! Tx: {}", tx),
+                    match transfer_tool.execute_transfer(to.to_string(), amount.parse()?).await {
+                        Ok(_) => println!("Transfer successful!"),
                         Err(e) => error!("Transfer failed: {}", e)
                     }
                 } else {
@@ -146,10 +308,54 @@ async fn main() -> Result<()> {
                         println!("Top 10 holders:");
                         for holder in holders {
                             println!("Address: {} | Amount: {} | %: {}", 
-                                holder.address, holder.amount_cur, holder.amount_percentage);
+                                holder.address,
+                                holder.amount_cur.unwrap_or(0.0),
+                                holder.amount_percentage.unwrap_or(0.0)
+                            );
                         }
                     },
                     Err(e) => error!("Failed to get holders: {}", e)
+                }
+            },
+
+            input if input.starts_with("metrics ") => {
+                let token = input.replace("metrics ", "");
+                debug!("Getting metrics for token: {}", token);
+
+                match tokio::try_join!(gmgn.get_token_info(&token), gmgn.get_token_price_info(&token)) {
+                    Ok((info, price_info)) => {
+                        println!("================================");
+                        println!("Token Metrics for {}", info.name.as_deref().unwrap_or("Unknown"));
+                        println!("================================");
+                        println!("Symbol: {}", info.symbol.as_deref().unwrap_or("Unknown"));
+                        println!("Current Price: ${}", price_info.price.map_or("Unknown".to_string(), |p| format!("{:.6}", p)));
+                        println!("Market Cap: ${}", price_info.market_cap.map_or("Unknown".to_string(), |m| {
+                            if m >= 1_000_000_000.0 {
+                                format!("{:.2}B", m / 1_000_000_000.0)
+                            } else if m >= 1_000_000.0 {
+                                format!("{:.2}M", m / 1_000_000.0)
+                            } else {
+                                format!("{:.2}", m)
+                            }
+                        }));
+                        println!("24h Volume: ${}", price_info.volume.map_or("Unknown".to_string(), |v| {
+                            if v >= 1_000_000_000.0 {
+                                format!("{:.2}B", v / 1_000_000_000.0)
+                            } else if v >= 1_000_000.0 {
+                                format!("{:.2}M", v / 1_000_000.0)
+                            } else {
+                                format!("{:.2}", v)
+                            }
+                        }));
+                        println!("24h Change: {}%", price_info.price_change_24h.map_or("Unknown".to_string(), |p| format!("{:+.2}", p)));
+                        println!("1h Change: {}%", price_info.price_change_1h.map_or("Unknown".to_string(), |p| format!("{:+.2}", p)));
+                        println!("5m Change: {}%", price_info.price_change_5m.map_or("Unknown".to_string(), |p| format!("{:+.2}", p)));
+                        println!("Decimals: {}", info.decimals.map_or("Unknown".to_string(), |d| d.to_string()));
+                        println!("Holder Count: {}", info.holder_count.map_or("Unknown".to_string(), |h| h.to_string()));
+                        println!("Liquidity: {}", info.liquidity.as_deref().unwrap_or("Unknown"));
+                        println!("================================");
+                    },
+                    Err(e) => error!("Failed to get token metrics: {}", e)
                 }
             },
 
