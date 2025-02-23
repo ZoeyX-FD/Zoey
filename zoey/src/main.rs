@@ -11,6 +11,7 @@ use zoey_core::init_logging;
 use zoey_core::knowledge::KnowledgeBase;
 use zoey_core::{agent::Agent, clients::twitter::TwitterClient};
 use zoey_core::config::TwitterConfig;
+use zoey_core::interaction_history::InteractionHistory;
 use sqlite_vec::sqlite3_vec_init;
 use tokio_rusqlite::ffi::sqlite3_auto_extension;
 use tokio_rusqlite::Connection;
@@ -92,9 +93,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let conn = Connection::open(args.db_path).await?;
+    
     let knowledge = KnowledgeBase::new(conn.clone(), embedding_model).await?;
+    let interaction_history = InteractionHistory::new(conn.clone()).await?;
 
-    let agent = Agent::new(character, completion_model, knowledge);
+    let agent = Agent::new(
+        character, 
+        completion_model, 
+        knowledge,
+        interaction_history,
+    );
 
     let config = AttentionConfig {
         bot_names: vec![agent.character.name.clone()],
@@ -144,7 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(twitter_config),
         ).await?;
         
-        let intel_folder = "/root/RIG2/analysis_reports";
+        let intel_folder = "/root/RIG4/analysis_reports";
         info!("Setting up intel folder monitoring: {}", intel_folder);
         
         let handle: tokio::task::JoinHandle<()> = tokio::spawn(async move {

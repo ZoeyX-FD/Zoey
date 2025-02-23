@@ -6,26 +6,36 @@ use rig::{
 use tracing::{info, debug, error};
 use crate::{character::Character, knowledge::KnowledgeBase, intel::CryptoIntel};
 use rig::message::Text;
+use crate::interaction_history::InteractionHistory;
 
 #[derive(Clone)]
 pub struct Agent<M: CompletionModel, E: EmbeddingModel + 'static> {
     pub character: Character,
     completion_model: M,
     knowledge: KnowledgeBase<E>,
+    pub interaction_history: InteractionHistory,
 }
 
 impl<M: CompletionModel, E: EmbeddingModel> Agent<M, E> {
-    pub fn new(character: Character, completion_model: M, knowledge: KnowledgeBase<E>) -> Self {
+    pub fn new(character: Character, completion_model: M, knowledge: KnowledgeBase<E>, interaction_history: InteractionHistory) -> Self {
         info!(name = character.name, "Creating new agent");
 
         Self {
             character,
             completion_model,
             knowledge,
+            interaction_history,
         }
     }
 
     pub fn builder(&self) -> AgentBuilder<M> {
+        let mut builder = AgentBuilder::new(self.completion_model.clone());
+
+        // Add performance insights to context
+        if let Ok(insights) = futures::executor::block_on(self.interaction_history.generate_performance_insights()) {
+            builder = builder.context(&insights);
+        }
+
         // Build character context
         let character_context = format!(
             "Your name is: {}
@@ -65,13 +75,11 @@ impl<M: CompletionModel, E: EmbeddingModel> Agent<M, E> {
             self.character.style.meme_phrases.join("\n")
         );
 
-        let builder = AgentBuilder::new(self.completion_model.clone())
+        builder
             .preamble(&self.character.preamble)
             .context(&character_context)
             .context(&style_context)
-            .dynamic_context(2, self.knowledge.clone().document_index());
-
-        builder
+            .dynamic_context(2, self.knowledge.clone().document_index())
     }
 
     pub fn knowledge(&self) -> &KnowledgeBase<E> {

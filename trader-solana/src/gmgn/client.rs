@@ -1,4 +1,6 @@
 use reqwest;
+use std::error::Error;
+use serde_json::Value;
 use crate::gmgn::types::{
     TopHoldersResponse, 
     HolderInfo, 
@@ -7,13 +9,49 @@ use crate::gmgn::types::{
     WalletHoldingsResponse, 
     WalletHoldingsData, 
     SwapRankResponse, 
-    TokenPriceInfo, 
-    TokenDetailResponse
+    TokenPriceInfo,
 };
 
 const BASE_URL: &str = "https://gmgn.mobi";
 pub struct GMGNClient {
     client: reqwest::Client,
+}
+
+#[allow(dead_code)]
+pub struct TokenPriceData {
+    price: Option<f64>,
+    price_change_percent: Option<f64>,
+    volume: Option<f64>,
+    liquidity: Option<f64>,
+    market_cap: Option<f64>,
+    price_change_percent1h: Option<f64>,
+    price_change_percent5m: Option<f64>,
+}
+
+impl TokenPriceData {
+    fn from_alternative_api(data: &serde_json::Value) -> Self {
+        if let Some(first_rank) = data.get("data").and_then(|d| d.get("rank")).and_then(|r| r.get(0)) {
+            Self {
+                price: first_rank.get("price").and_then(|v| v.as_f64()),
+                price_change_percent: first_rank.get("price_change_percent").and_then(|v| v.as_f64()),
+                volume: first_rank.get("volume").and_then(|v| v.as_f64()),
+                liquidity: first_rank.get("liquidity").and_then(|v| v.as_f64()),
+                market_cap: first_rank.get("market_cap").and_then(|v| v.as_f64()),
+                price_change_percent1h: first_rank.get("price_change_percent1h").and_then(|v| v.as_f64()),
+                price_change_percent5m: first_rank.get("price_change_percent5m").and_then(|v| v.as_f64()),
+            }
+        } else {
+            Self {
+                price: None,
+                price_change_percent: None,
+                volume: None,
+                liquidity: None,
+                market_cap: None,
+                price_change_percent1h: None,
+                price_change_percent5m: None,
+            }
+        }
+    }
 }
 
 impl GMGNClient {
@@ -132,89 +170,139 @@ impl GMGNClient {
     }
 
     pub async fn get_token_price_info(&self, token: &str) -> Result<TokenPriceInfo, reqwest::Error> {
-        // Try multiple time periods to find the token
-        let time_periods = ["1h", "24h", "7d"];
-        let mut token_data = TokenPriceInfo::default();
-        let mut raw_response = String::new();
-        let debug_mode = std::env::var("DEBUG").is_ok();
+        let url = format!("{BASE_URL}/api/v1/token_stats/sol/{token}");
+        
+        let params = vec![
+            ("device_id", "ede3a881-1043-49aa-b645-b19080cb07da"),
+            ("client_id", "gmgn_web_2025.0221.110436"),
+            ("from_app", "gmgn"),
+            ("app_ver", "2025.0221.110436"),
+            ("tz_name", "Asia/Bangkok"),
+            ("tz_offset", "25200"),
+            ("app_lang", "en"),
+        ];
 
-        for period in time_periods {
-            let url = format!("{BASE_URL}/defi/quotation/v1/rank/sol/swaps/{period}");
-            
-            let params = vec![
-                ("device_id", "ede3a881-1043-49aa-b645-b19080cb07da"),
-                ("client_id", "gmgn_web_2025.0220.193826"), 
-                ("from_app", "gmgn"),
-                ("app_ver", "2025.0220.193826"),
-                ("tz_name", "Asia/Bangkok"),
-                ("tz_offset", "25200"),
-                ("app_lang", "en"),
-                ("orderby", "swaps"),
-                ("direction", "desc"),
-                ("filters[]", "renounced"),
-                ("filters[]", "frozen"),
-                ("limit", "100")
-            ];
+        let response = self.client.get(&url)
+            .query(&params)
+            .header("accept", "*/*")
+            .header("accept-language", "en-US,en;q=0.9")
+            .header("content-type", "application/json")
+            .header("sec-fetch-dest", "empty")
+            .header("sec-fetch-mode", "cors")
+            .header("sec-fetch-site", "same-origin")
+            .header("x-requested-with", "XMLHttpRequest")
+            .send()
+            .await?;
 
-            let response = self.client.get(&url)
-                .query(&params)
-                .send()
-                .await?;
+        let text = response.text().await?;
+        
+        if std::env::var("DEBUG").is_ok() {
+            println!("\nRaw Price API Response:");
+            println!("{}", text);
+        }
 
-            let text = response.text().await?;
-            if debug_mode {
-                raw_response = text.clone();
-            }
+        // Try alternative endpoint if first one fails
+        let alt_url = format!("{BASE_URL}/defi/quotation/v1/rank/sol/swaps/1h");
+        let alt_params = vec![
+            ("device_id", "ede3a881-1043-49aa-b645-b19080cb07da"),
+            ("client_id", "gmgn_web_2025.0221.110436"),
+            ("from_app", "gmgn"),
+            ("app_ver", "2025.0221.110436"),
+            ("tz_name", "Asia/Bangkok"),
+            ("tz_offset", "25200"),
+            ("app_lang", "en"),
+            ("orderby", "swaps"),
+            ("direction", "desc"),
+            ("filters[]", "renounced"),
+            ("filters[]", "frozen"),
+            ("limit", "100")
+        ];
 
-            if let Ok(rank_response) = serde_json::from_str::<SwapRankResponse>(&text) {
-                if let Some(t) = rank_response.data.rank.into_iter().find(|t| t.address == token) {
-                    token_data = TokenPriceInfo {
+        let alt_response = self.client.get(&alt_url)
+            .query(&alt_params)
+            .send()
+            .await?;
+
+        let alt_text = alt_response.text().await?;
+        if std::env::var("DEBUG").is_ok() {
+            println!("\nAlternative Price API Response:");
+            println!("{}", alt_text);
+        }
+
+        if let Ok(rank_response) = serde_json::from_str::<SwapRankResponse>(&alt_text) {
+            for t in rank_response.data.rank {
+                if t.address == token {
+                    return Ok(TokenPriceInfo {
                         price: Some(t.price),
-                        market_cap: Some(t.market_cap as f64),
-                        volume: Some(t.volume as f64),
+                        market_cap: Some(t.market_cap),
+                        volume: Some(t.volume),
                         price_change_24h: None,
-                        price_change_1h: Some(t.price_change_percent),
+                        price_change_1h: Some(t.price_change_percent1h),
                         price_change_5m: Some(t.price_change_percent5m),
-                    };
-                    break;
+                    });
                 }
             }
         }
 
-        // Try alternative endpoint if token not found
-        if token_data == TokenPriceInfo::default() {
-            let alt_url = format!("{BASE_URL}/defi/quotation/v1/tokens/detail/sol/{token}");
-            let response = self.client.get(&alt_url)
-                .query(&[
-                    ("device_id", "ede3a881-1043-49aa-b645-b19080cb07da"),
-                    ("client_id", "gmgn_web_2025.0220.193826")
-                ])
-                .send()
-                .await?;
+        Ok(TokenPriceInfo::default())
+    }
 
-            let text = response.text().await?;
-            if debug_mode {
-                raw_response = text.clone();
-            }
-
-            if let Ok(detail_response) = serde_json::from_str::<TokenDetailResponse>(&text) {
-                token_data = TokenPriceInfo {
-                    price: detail_response.data.price,
-                    market_cap: detail_response.data.market_cap,
-                    volume: detail_response.data.volume_24h,
-                    price_change_24h: detail_response.data.price_change_24h,
-                    price_change_1h: detail_response.data.price_change_1h,
-                    price_change_5m: detail_response.data.price_change_5m,
-                };
-            }
-        }
-
-        // Only print raw response in debug mode
-        if debug_mode {
-            println!("\nRaw Price API Response:");
-            println!("{}", raw_response);
-        }
+    pub async fn analyze_token(&self, address: &str) -> Result<(), Box<dyn Error>> {
+        // Get token info
+        let _token_info = self.get_token_info(address).await?;
         
-        Ok(token_data)
+        // Get price info using the alternative endpoint
+        let alt_url = format!("{BASE_URL}/defi/quotation/v1/rank/sol/swaps/1h");
+        let alt_params = vec![
+            ("device_id", "ede3a881-1043-49aa-b645-b19080cb07da"),
+            ("client_id", "gmgn_web_2025.0221.110436"),
+            ("from_app", "gmgn"),
+            ("app_ver", "2025.0221.110436"),
+            ("tz_name", "Asia/Bangkok"),
+            ("tz_offset", "25200"),
+            ("app_lang", "en"),
+            ("orderby", "swaps"),
+            ("direction", "desc"),
+            ("filters[]", "renounced"),
+            ("filters[]", "frozen"),
+            ("limit", "100")
+        ];
+
+        let alt_response = self.client.get(&alt_url)
+            .query(&alt_params)
+            .send()
+            .await?;
+
+        let alt_text = alt_response.text().await?;
+        let alternative_price_response: Value = serde_json::from_str(&alt_text)?;
+
+        let price_data = TokenPriceData::from_alternative_api(&alternative_price_response);
+
+        if cfg!(debug_assertions) {
+            println!("\nRaw Price Data:");
+            println!("- Price: {}", price_data.price.map_or("None".to_string(), |p| format!("{:.8}", p)));
+            println!("- Market Cap: {}", price_data.market_cap.map_or("None".to_string(), |m| format!("${:.2}", m)));
+            println!("- Volume 24h: {}", price_data.volume.map_or("None".to_string(), |v| format!("${:.2}", v)));
+            println!("- Price Change 24h: {}", price_data.price_change_percent.map_or("None".to_string(), |c| format!("{:.2}%", c)));
+            println!("- Price Change 1h: {}", price_data.price_change_percent1h.map_or("None".to_string(), |c| format!("{:.2}%", c)));
+            println!("- Price Change 5m: {}", price_data.price_change_percent5m.map_or("None".to_string(), |c| format!("{:.2}%", c)));
+        }
+
+        // Get top holders
+        let holders = self.get_top_holders(address, Some(5), None, None, None).await?;
+        
+        if cfg!(debug_assertions) {
+            println!("\nRaw Holder Data:");
+            for (i, holder) in holders.iter().enumerate() {
+                println!("Holder {}: {{ address: {}, amount: {:?}, usd_value: {:?} }}", 
+                    i + 1, 
+                    holder.address, 
+                    holder.amount_cur,
+                    holder.usd_value
+                );
+            }
+        }
+
+        Ok(())
     }
 }

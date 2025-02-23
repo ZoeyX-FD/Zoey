@@ -36,7 +36,7 @@ pub struct AttentionConfig {
 impl Default for AttentionConfig {
     fn default() -> Self {
         Self {
-            bot_names: vec!["zoey".to_string(), "zoey".to_string()],
+            bot_names: vec!["AgentJoeyX".to_string(), "joey".to_string()],
             reply_threshold: 0.6,
             max_history_messages: 10,
             cooldown_messages: 3,

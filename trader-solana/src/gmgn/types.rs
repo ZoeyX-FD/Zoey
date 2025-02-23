@@ -318,3 +318,51 @@ pub fn print_debug_info(info: &TokenInfo, price_info: Option<&TokenPriceInfo>, h
     }
     println!("================\n");
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TokenCompleteResponse {
+    pub code: i32,
+    pub reason: String,
+    pub message: String,
+    pub data: Vec<TokenCompleteData>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TokenCompleteData {
+    pub address: String,
+    pub symbol: String,
+    pub name: String,
+    pub decimals: i32,
+    pub logo: Option<String>,
+    pub biggest_pool_address: String,
+    pub open_timestamp: i64,
+    pub holder_count: i64,
+    pub circulating_supply: String,
+    pub total_supply: String,
+    pub max_supply: String,
+    pub liquidity: String,
+    pub creation_timestamp: i64,
+    pub price: TokenPriceDetails,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TokenPriceDetails {
+    pub address: String,
+    pub price: String,
+    pub price_1m: String,
+    pub price_5m: String,
+    pub price_1h: String,
+    pub price_6h: String,
+    pub price_24h: String,
+    pub volume_1m: String,
+    pub volume_5m: String,
+    pub volume_1h: String,
+    pub volume_6h: String,
+    pub volume_24h: String,
+    pub swaps_1m: i64,
+    pub swaps_5m: i64,
+    pub swaps_1h: i64,
+    pub swaps_6h: i64,
+    pub swaps_24h: i64,
+    pub hot_level: i32,
+}

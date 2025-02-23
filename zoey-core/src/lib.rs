@@ -21,3 +21,4 @@ pub mod config;
 pub mod knowledge;
 pub mod intel;
 pub mod loaders;
+pub mod interaction_history;

@@ -21,6 +21,7 @@ use crate::intel::{CryptoIntel, scan_intel_folder, cleanup_processed_files};
 use tokio::sync::Mutex;
 use chrono::Timelike;
 use rig::message::Text;
+use crate::interaction_history::InteractionMetrics;
 
 const MAX_TWEET_LENGTH: usize = 270;
 const MAX_HISTORY_TWEETS: i64 = 10;
@@ -279,7 +280,7 @@ impl<M: CompletionModel + 'static, E: EmbeddingModel + 'static> TwitterClient<M,
             .build();
 
         debug!("Generating tweet content");
-        let tweet_prompt = "Share a single brief thought or observation in one short sentence. Be direct and concise. No questions, hashtags, or emojis.";
+        let tweet_prompt = "Share a single brief thought or observation in one short sentence. Be direct and concise.";
         
         let response = match agent.prompt(Text::from(tweet_prompt.to_string())).await {
             Ok(response) => {
@@ -320,6 +321,22 @@ impl<M: CompletionModel + 'static, E: EmbeddingModel + 'static> TwitterClient<M,
         debug!("Tweet sent {}", if has_image { "with image" } else { "without image" });
         
         Ok(())
+    }
+
+    async fn update_tweet_metrics(&self, tweet_id: &str, content: &str) {
+        let mut metrics = InteractionMetrics::new(tweet_id.to_string(), content.to_string());
+        
+        if let Ok(updated_tweet) = self.scraper.lock().await.get_tweet(tweet_id).await {
+            metrics.likes = updated_tweet.likes.unwrap_or(0) as i32;
+            metrics.retweets = updated_tweet.retweets.unwrap_or(0) as i32;
+            metrics.quotes = updated_tweet.quote_count.unwrap_or(0) as i32;
+            metrics.replies = updated_tweet.reply_count.unwrap_or(0) as i32;
+            metrics.calculate_engagement_score();
+            
+            if let Err(e) = self.agent.interaction_history.log_interaction(metrics).await {
+                error!("Failed to update interaction metrics: {}", e);
+            }
+        }
     }
 
     async fn handle_mention(
@@ -445,7 +462,17 @@ impl<M: CompletionModel + 'static, E: EmbeddingModel + 'static> TwitterClient<M,
 
         // Reply to the original tweet
         for chunk in chunks.iter() {
-            self.scraper.lock().await.send_tweet(chunk, Some(&tweet.id.clone().unwrap_or_default()), None).await?;
+            let tweet_id = tweet.id.clone().unwrap_or_default();
+            self.scraper.lock().await.send_tweet(chunk, Some(&tweet_id), None).await?;
+            
+            // Schedule metrics update
+            let client = self.clone();
+            let tweet_id = tweet_id.clone();
+            let content = chunk.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
+                client.update_tweet_metrics(&tweet_id, &content).await;
+            });
         }
 
         Ok(())

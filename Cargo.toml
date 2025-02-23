@@ -5,8 +5,11 @@ members = [
     "crypto-agents", # Coingecko Research agent intelligence
     "zoey-core",  # zoeycore
     "trader-solana",  # trader-solana
-    "zoey-rag"  # agent research with doc and web intelligence
+    "zoey-rag" #agent research with doc and web intelligence
+    
 ]
+
+exclude = ["rig-onchain-kit"]
 
 resolver = "2"
 
