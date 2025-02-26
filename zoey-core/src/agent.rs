@@ -98,7 +98,7 @@ impl<M: CompletionModel, E: EmbeddingModel> Agent<M, E> {
 
                 As a chef who loves explaining crypto through cooking metaphors:
                 1. review this market data
-                2. If you find it interesting or important, create a tweet about it ,Keep under 260 characters (MUST)
+                2. If you find it interesting or important, create a tweet about it ,Keep under 280 characters (MUST)
                 3. If not interesting enough, respond with 'NO_POST'
                 
                 Rules for tweets:
@@ -112,7 +112,7 @@ impl<M: CompletionModel, E: EmbeddingModel> Agent<M, E> {
                 - No asterisks, ellipsis, or other special formatting
                 - Format numbers with standard notation{}",
                 intel.content,
-                if retries < 3 { "\n- Make it more concise than before, keep it under 260 characters" } else { "" }
+                if retries < 3 { "\n- Make it more concise than before, keep it under 280 characters" } else { "" }
             );
 
             info!("Sending prompt to completion model");
@@ -138,7 +138,7 @@ impl<M: CompletionModel, E: EmbeddingModel> Agent<M, E> {
             
             retries -= 1;
             if retries == 0 {
-                error!("Failed to generate tweet under 240 characters after all retries");
+                error!("Failed to generate tweet under 280 characters after all retries");
                 return Ok("NO_POST".to_string());
             }
             

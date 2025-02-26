@@ -4,7 +4,7 @@ use rig::{
 };
 use rig::embeddings::embedding::EmbeddingModel;
 use tokio_rusqlite::Connection;
-use tracing::{debug, info};
+use tracing::{debug, info, error};
 
 use super::models::{Account, Channel, Document, Message, TradeAction, Trade};
 use rig_sqlite::{SqliteError, SqliteVectorIndex, SqliteVectorStore};
@@ -20,13 +20,14 @@ pub struct KnowledgeBase<E: EmbeddingModel + Clone + 'static> {
 
 impl<E: EmbeddingModel> KnowledgeBase<E> {
     pub async fn new(conn: Connection, embedding_model: E) -> Result<Self, VectorStoreError> {
+        info!("Initializing KnowledgeBase with vector stores");
         let document_store = SqliteVectorStore::new(conn.clone(), &embedding_model).await?;
         let message_store = SqliteVectorStore::new(conn.clone(), &embedding_model).await?;
 
+        debug!("Creating database schema");
         conn.call(|conn| {
             conn.execute_batch(
                 "BEGIN;
-
                 -- User management tables
                 CREATE TABLE IF NOT EXISTS accounts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -71,6 +72,7 @@ impl<E: EmbeddingModel> KnowledgeBase<E> {
         .await
         .map_err(|e| VectorStoreError::DatastoreError(Box::new(e)))?;
 
+        info!("KnowledgeBase initialized successfully");
         Ok(Self {
             conn,
             document_store,
@@ -80,7 +82,8 @@ impl<E: EmbeddingModel> KnowledgeBase<E> {
     }
 
     pub async fn create_user(&self, name: String, source: String) -> Result<i64, SqliteError> {
-        self.conn
+        info!(name = %name, source = %source, "Creating new user");
+        let result = self.conn
             .call(move |conn| {
                 conn.query_row(
                     "INSERT INTO accounts (name, source, created_at, updated_at)
@@ -94,7 +97,14 @@ impl<E: EmbeddingModel> KnowledgeBase<E> {
                 .map_err(tokio_rusqlite::Error::from)
             })
             .await
-            .map_err(|e| SqliteError::DatabaseError(Box::new(e)))
+            .map_err(|e| SqliteError::DatabaseError(Box::new(e)));
+
+        match &result {
+            Ok(id) => debug!(user_id = %id, "User created/updated successfully"),
+            Err(e) => error!(error = ?e, "Failed to create/update user"),
+        }
+
+        result
     }
 
     pub fn document_index(self) -> SqliteVectorIndex<E, Document> {
@@ -186,6 +196,14 @@ impl<E: EmbeddingModel> KnowledgeBase<E> {
     }
 
     pub async fn create_message(&self, msg: Message) -> anyhow::Result<i64> {
+        info!(
+            source = %msg.source.as_str(),
+            channel_type = %msg.channel_type.as_str(),
+            channel_id = %msg.channel_id,
+            "Creating new message"
+        );
+
+        debug!("Generating embeddings for message");
         let embeddings = EmbeddingsBuilder::new(self.embedding_model.clone())
             .documents(vec![msg.clone()])?
             .build()
@@ -193,11 +211,11 @@ impl<E: EmbeddingModel> KnowledgeBase<E> {
 
         let store = self.message_store.clone();
 
-        self.conn
+        let result = self.conn
             .call(move |conn| {
                 let tx = conn.transaction()?;
 
-                // First upsert the channel
+                debug!("Upserting channel information");
                 tx.execute(
                     "INSERT INTO channels (channel_id, channel_type, source, name, created_at, updated_at) 
                      VALUES (?1, ?2, ?3, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
@@ -210,20 +228,29 @@ impl<E: EmbeddingModel> KnowledgeBase<E> {
                     ],
                 )?;
 
+                debug!("Storing message with embeddings");
                 let id = store
                     .add_rows_with_txn(&tx, embeddings)
                     .map_err(tokio_rusqlite::Error::from)?;
 
                 tx.commit()?;
-
+                
+                debug!(message_id = %id, "Message stored successfully");
                 Ok(id)
             })
             .await
-            .map_err(anyhow::Error::from)
+            .map_err(anyhow::Error::from);
+
+        if let Err(ref e) = result {
+            error!(error = %e, "Failed to store message");
+        }
+
+        result
     }
 
     pub async fn get_message(&self, id: i64) -> Result<Option<Message>, SqliteError> {
-        self.conn
+        debug!(message_id = %id, "Fetching message");
+        let result = self.conn
             .call(move |conn| {
                 Ok(conn.prepare("SELECT id, source, source_id, channel_type, channel_id, account_id, role, content, created_at FROM messages WHERE id = ?1")?
                     .query_row(rusqlite::params![id], |row| {
@@ -231,7 +258,15 @@ impl<E: EmbeddingModel> KnowledgeBase<E> {
                     }).optional()?)
             })
             .await
-            .map_err(|e| SqliteError::DatabaseError(Box::new(e)))
+            .map_err(|e| SqliteError::DatabaseError(Box::new(e)));
+
+        match &result {
+            Ok(Some(_)) => debug!(message_id = %id, "Message retrieved successfully"),
+            Ok(None) => debug!(message_id = %id, "Message not found"),
+            Err(e) => error!(message_id = %id, error = ?e, "Failed to retrieve message"),
+        }
+
+        result
     }
 
     pub async fn get_recent_messages(
@@ -239,7 +274,8 @@ impl<E: EmbeddingModel> KnowledgeBase<E> {
         channel_id: i64,
         limit: usize,
     ) -> Result<Vec<Message>, SqliteError> {
-        self.conn
+        debug!(channel_id = %channel_id, limit = %limit, "Fetching recent messages");
+        let result = self.conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
                     "SELECT id, source, source_id, channel_type, channel_id, account_id, role, content, created_at 
@@ -249,16 +285,30 @@ impl<E: EmbeddingModel> KnowledgeBase<E> {
                      LIMIT ?2",
                 )?;
 
-                let messages = stmt
-                    .query_map(rusqlite::params![channel_id, limit], |row| {
-                        Message::try_from(row)
-                    })?
-                    .collect::<Result<Vec<_>, _>>()?;
+                let messages = stmt.query_map([channel_id, limit as i64], |row| {
+                    Message::try_from(row)
+                })?.collect::<Result<Vec<_>, _>>()?;
+
+                debug!(
+                    channel_id = %channel_id,
+                    message_count = %messages.len(),
+                    "Retrieved recent messages"
+                );
 
                 Ok(messages)
             })
             .await
-            .map_err(|e| SqliteError::DatabaseError(Box::new(e)))
+            .map_err(|e| SqliteError::DatabaseError(Box::new(e)));
+
+        if let Err(ref e) = result {
+            error!(
+                channel_id = %channel_id,
+                error = ?e,
+                "Failed to retrieve recent messages"
+            );
+        }
+
+        result
     }
 
     pub async fn channel_messages(

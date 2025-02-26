@@ -31,6 +31,7 @@ const DEFAULT_MODELS: &[(&str, &str)] = &[
     ("openrouter", "anthropic/claude-2"),
     ("openrouter", "google/gemini-2.0-flash-001"),
     ("openrouter", "mistralai/mistral-nemo"),
+    ("ollama", "deepseek-r1:1.5b-qwen-distill-q8_0"),
 ];
 
 pub struct MultiAgentSystem {

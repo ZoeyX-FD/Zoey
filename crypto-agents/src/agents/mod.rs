@@ -52,6 +52,7 @@ pub enum ModelProvider {
     OpenAI,
     Cohere,
     OpenRouter,
+    Ollama,
 }
 
 impl ModelProvider {
@@ -63,6 +64,7 @@ impl ModelProvider {
             "openai" => Some(Self::OpenAI),
             "cohere" => Some(Self::Cohere),
             "openrouter" => Some(Self::OpenRouter),
+            "ollama" => Some(Self::Ollama),
             _ => None
         }
     }
@@ -75,6 +77,7 @@ impl ModelProvider {
             Self::OpenAI => "gpt-4-turbo-preview",
             Self::Cohere => "command-nightly",
             Self::OpenRouter => "anthropic/claude-2",
+            Self::Ollama => "deepseek-r1:1.5b-qwen-distill-q8_0",
         }
     }
 
@@ -86,6 +89,7 @@ impl ModelProvider {
             Self::OpenAI => "openai",
             Self::Cohere => "cohere",
             Self::OpenRouter => "openrouter",
+            Self::Ollama => "ollama",
         }.to_string()
     }
 
@@ -131,6 +135,7 @@ pub struct BaseAgent {
     openai_agent: Option<RigAgent<openai::CompletionModel>>,
     cohere_agent: Option<RigAgent<cohere::CompletionModel>>,
     openrouter_agent: Option<RigAgent<openrouter::OpenRouterCompletionModel>>,
+    ollama_agent: Option<RigAgent<openai::CompletionModel>>,
     #[allow(dead_code)]
     preamble: String,
     temperature: f32,
@@ -142,7 +147,7 @@ impl BaseAgent {
         tokio::fs::create_dir_all(AGENT_MEMORY_DIR).await?;
         
         // Initialize appropriate client and agent based on provider
-        let (deepseek_agent, gemini_agent, mistral_agent, openai_agent, cohere_agent, openrouter_agent) = match provider {
+        let (deepseek_agent, gemini_agent, mistral_agent, openai_agent, cohere_agent, openrouter_agent, ollama_agent) = match provider {
             ModelProvider::DeepSeek => {
                 let deepseek_key = env::var("DEEPSEEK_API_KEY")
                     .map_err(|_| AgentError::ApiError("DEEPSEEK_API_KEY not found".to_string()))?;
@@ -153,7 +158,7 @@ impl BaseAgent {
                     .temperature(0.7)
                     .build();
                     
-                (Some(agent), None, None, None, None, None)
+                (Some(agent), None, None, None, None, None, None)
             },
             ModelProvider::Gemini => {
                 let gemini_key = env::var("GEMINI_API_KEY")
@@ -165,7 +170,7 @@ impl BaseAgent {
                     .temperature(0.7)
                     .build();
                 
-                (None, Some(agent), None, None, None, None)
+                (None, Some(agent), None, None, None, None, None)
             },
             ModelProvider::Mistral => {
                 let mistral_key = env::var("MISTRAL_API_KEY")
@@ -177,7 +182,7 @@ impl BaseAgent {
                     .temperature(0.7)
                     .build();
                 
-                (None, None, Some(agent), None, None, None)
+                (None, None, Some(agent), None, None, None, None)
             },
             ModelProvider::OpenAI => {
                 let openai_key = env::var("OPENAI_API_KEY")
@@ -189,7 +194,7 @@ impl BaseAgent {
                     .temperature(0.7)
                     .build();
                 
-                (None, None, None, Some(agent), None, None)
+                (None, None, None, Some(agent), None, None, None)
             },
             ModelProvider::Cohere => {
                 let cohere_key = env::var("COHERE_API_KEY")
@@ -201,7 +206,7 @@ impl BaseAgent {
                     .temperature(0.7)
                     .build();
                 
-                (None, None, None, None, Some(agent), None)
+                (None, None, None, None, Some(agent), None, None)
             },
             ModelProvider::OpenRouter => {
                 let openrouter_key = env::var("OPENROUTER_API_KEY")
@@ -213,7 +218,16 @@ impl BaseAgent {
                     .temperature(0.7)
                     .build();
                 
-                (None, None, None, None, None, Some(agent))
+                (None, None, None, None, None, Some(agent), None)
+            },
+            ModelProvider::Ollama => {
+                let client = openai::Client::from_url("ollama", "http://localhost:11434/v1");
+                let agent = client.agent(&model)
+                    .preamble(&preamble)
+                    .temperature(0.7)
+                    .build();
+                
+                (None, None, None, None, None, None, Some(agent))
             },
         };
         
@@ -232,6 +246,7 @@ impl BaseAgent {
             openai_agent,
             cohere_agent,
             openrouter_agent,
+            ollama_agent,
             preamble,
             temperature: 0.7,
         };
@@ -281,6 +296,11 @@ impl BaseAgent {
             ModelProvider::OpenRouter => {
                 let agent = self.openrouter_agent.as_ref()
                     .ok_or_else(|| AgentError::ApiError("OpenRouter agent not initialized".to_string()))?;
+                agent.prompt(full_prompt.to_owned()).await
+            },
+            ModelProvider::Ollama => {
+                let agent = self.ollama_agent.as_ref()
+                    .ok_or_else(|| AgentError::ApiError("Ollama agent not initialized".to_string()))?;
                 agent.prompt(full_prompt.to_owned()).await
             },
         };

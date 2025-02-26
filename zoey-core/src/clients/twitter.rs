@@ -203,8 +203,9 @@ impl<M: CompletionModel + 'static, E: EmbeddingModel + 'static> TwitterClient<M,
                                     .as_str()
                                     .unwrap_or_default()
                                     .to_string();
-                                let photos = tweet["photos"].as_array();
-                                println!("photos: {:?}", photos);
+                                
+                                // Instead of creating a full Tweet struct, just use the existing methods
+                                // with the extracted content and ID
                                 self.handle_like(&tweet_content, &tweet_id).await;
                                 self.handle_retweet(&tweet_content, &tweet_id).await;
                                 self.handle_quote(&tweet_content, &tweet_id).await;
@@ -343,6 +344,21 @@ impl<M: CompletionModel + 'static, E: EmbeddingModel + 'static> TwitterClient<M,
         &self,
         tweet: agent_twitter_client::models::Tweet,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let tweet_id = tweet.id.clone().unwrap_or_default();
+        
+        // Fast check for duplicates - use a non-blocking approach
+        let should_skip = match self.agent.interaction_history.has_interaction(&tweet_id, "reply").await {
+            Ok(true) => {
+                debug!(tweet_id = %tweet_id, "Already replied to this tweet, skipping");
+                true
+            },
+            _ => false
+        };
+        
+        if should_skip {
+            return Ok(());
+        }
+
         let tweet_text = Arc::new(tweet.text.clone().unwrap_or_default());
         let knowledge = self.agent.knowledge();
         let knowledge_msg = Message::from(tweet.clone());
@@ -463,9 +479,21 @@ impl<M: CompletionModel + 'static, E: EmbeddingModel + 'static> TwitterClient<M,
         // Reply to the original tweet
         for chunk in chunks.iter() {
             let tweet_id = tweet.id.clone().unwrap_or_default();
-            self.scraper.lock().await.send_tweet(chunk, Some(&tweet_id), None).await?;
+            if let Err(err) = self.scraper.lock().await.send_tweet(chunk, Some(&tweet_id), None).await {
+                error!(?err, "Failed to send reply");
+                return Err(Box::new(err));
+            } else {
+                // Record successful reply - do this in a separate task to not block the response
+                let history = self.agent.interaction_history.clone();
+                let tweet_id_clone = tweet_id.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = history.record_interaction(&tweet_id_clone, "reply").await {
+                        error!("Failed to record reply interaction: {}", e);
+                    }
+                });
+            }
             
-            // Schedule metrics update
+            // Schedule metrics update in background
             let client = self.clone();
             let tweet_id = tweet_id.clone();
             let content = chunk.clone();
@@ -539,30 +567,79 @@ impl<M: CompletionModel + 'static, E: EmbeddingModel + 'static> TwitterClient<M,
     }
 
     async fn handle_like(&self, tweet_content: &str, tweet_id: &str) {
+        // First check if we've already liked this tweet
+        match self.agent.interaction_history.has_interaction(tweet_id, "like").await {
+            Ok(true) => {
+                debug!(tweet_id = %tweet_id, "Already liked this tweet, skipping");
+                return;
+            },
+            Err(e) => {
+                error!("Error checking like history: {}", e);
+                // Continue anyway, worst case we try to like again
+            },
+            _ => {}
+        }
+
         if self.attention.should_like(tweet_content).await {
-            debug!(tweet_content = %tweet_content, "Agent decided to like tweet");
+            debug!(tweet_id = %tweet_id, tweet_content = %tweet_content, "Agent decided to like tweet");
             if let Err(err) = self.scraper.lock().await.like_tweet(tweet_id).await {
                 error!(?err, "Failed to like tweet");
+            } else {
+                // Record successful like
+                if let Err(e) = self.agent.interaction_history.record_interaction(tweet_id, "like").await {
+                    error!("Failed to record like interaction: {}", e);
+                }
             }
         } else {
-            debug!(tweet_content = %tweet_content, "Agent decided not to like tweet");
+            debug!(tweet_id = %tweet_id, tweet_content = %tweet_content, "Agent decided not to like tweet");
         }
     }
 
     async fn handle_retweet(&self, tweet_content: &str, tweet_id: &str) {
+        // First check if we've already retweeted this tweet
+        match self.agent.interaction_history.has_interaction(tweet_id, "retweet").await {
+            Ok(true) => {
+                debug!(tweet_id = %tweet_id, "Already retweeted this tweet, skipping");
+                return;
+            },
+            Err(e) => {
+                error!("Error checking retweet history: {}", e);
+                // Continue anyway, worst case we try to retweet again
+            },
+            _ => {}
+        }
+
         if self.attention.should_retweet(tweet_content).await {
-            debug!(tweet_content = %tweet_content, "Agent decided to retweet");
+            debug!(tweet_id = %tweet_id, tweet_content = %tweet_content, "Agent decided to retweet");
             if let Err(err) = self.scraper.lock().await.retweet(tweet_id).await {
                 error!(?err, "Failed to retweet");
+            } else {
+                // Record successful retweet
+                if let Err(e) = self.agent.interaction_history.record_interaction(tweet_id, "retweet").await {
+                    error!("Failed to record retweet interaction: {}", e);
+                }
             }
         } else {
-            debug!(tweet_content = %tweet_content, "Agent decided not to retweet");
+            debug!(tweet_id = %tweet_id, tweet_content = %tweet_content, "Agent decided not to retweet");
         }
     }
 
     async fn handle_quote(&self, tweet_content: &str, tweet_id: &str) {
+        // First check if we've already quoted this tweet
+        match self.agent.interaction_history.has_interaction(tweet_id, "quote").await {
+            Ok(true) => {
+                debug!(tweet_id = %tweet_id, "Already quoted this tweet, skipping");
+                return;
+            },
+            Err(e) => {
+                error!("Error checking quote history: {}", e);
+                // Continue anyway, worst case we try to quote again
+            },
+            _ => {}
+        }
+
         if self.attention.should_quote(tweet_content).await {
-            debug!(tweet_content = %tweet_content, "Agent decided to quote tweet");
+            debug!(tweet_id = %tweet_id, tweet_content = %tweet_content, "Agent decided to quote tweet");
             
             // Download tweet photos if present
             let mut image_urls = Vec::new();
@@ -600,9 +677,14 @@ impl<M: CompletionModel + 'static, E: EmbeddingModel + 'static> TwitterClient<M,
             };
             if let Err(err) = self.scraper.lock().await.send_quote_tweet(&response, tweet_id, None).await {
                 error!(?err, "Failed to quote tweet");
+            } else {
+                // Record successful quote
+                if let Err(e) = self.agent.interaction_history.record_interaction(tweet_id, "quote").await {
+                    error!("Failed to record quote interaction: {}", e);
+                }
             }
         } else {
-            debug!(tweet_content = %tweet_content, "Agent decided not to quote tweet");
+            debug!(tweet_id = %tweet_id, tweet_content = %tweet_content, "Agent decided not to quote tweet");
         }
     }
 
@@ -613,7 +695,7 @@ impl<M: CompletionModel + 'static, E: EmbeddingModel + 'static> TwitterClient<M,
         let tweet_content = tweet.text.clone().unwrap_or_default();
         let tweet_id = tweet.id.clone().unwrap_or_default();
 
-        // Handle interactions
+        // Use individual handlers which now check for duplicates
         self.handle_like(&tweet_content, &tweet_id).await;
         self.handle_retweet(&tweet_content, &tweet_id).await;
         self.handle_quote(&tweet_content, &tweet_id).await;
@@ -821,6 +903,75 @@ impl<M: CompletionModel + 'static, E: EmbeddingModel + 'static> TwitterClient<M,
             }
         }
 
+        Ok(())
+    }
+
+    // Add this attribute to suppress the dead code warning
+    #[allow(dead_code)]
+    fn should_quote(&self, tweet: &agent_twitter_client::models::Tweet) -> bool {
+        // Don't quote our own tweets
+        if tweet.username.as_ref().map(|u| u.to_lowercase()) == Some(self.username.to_lowercase()) {
+            return false;
+        }
+
+        // Don't quote tweets that are replies
+        if tweet.in_reply_to_status_id.is_some() {
+            return false;
+        }
+
+        // Check if tweet has good engagement
+        let has_engagement = tweet.likes.unwrap_or(0) >= 5 || 
+                           tweet.retweets.unwrap_or(0) >= 2;
+
+        // Check tweet has meaningful content (not too short)
+        let has_content = tweet.text.as_ref()
+            .map(|t| t.len() > 20)
+            .unwrap_or(false);
+
+        has_engagement && has_content
+    }
+
+    // Add this attribute to suppress the dead code warning
+    #[allow(dead_code)]
+    async fn process_tweet_interactions(&self, tweet: &agent_twitter_client::models::Tweet) -> Result<(), Box<dyn std::error::Error>> {
+        let tweet_id = tweet.id.clone().unwrap_or_default();
+        
+        // Get list of pending interactions
+        let pending = self.agent.interaction_history.get_pending_interactions(&tweet_id).await?;
+        
+        for interaction in pending {
+            match interaction.as_str() {
+                "like" => {
+                    if let Ok(_) = self.scraper.lock().await.like_tweet(&tweet_id).await {
+                        self.agent.interaction_history.record_interaction(&tweet_id, "like").await?;
+                        debug!("Liked tweet: {}", tweet_id);
+                    }
+                },
+                "retweet" => {
+                    if let Ok(_) = self.scraper.lock().await.retweet(&tweet_id).await {
+                        self.agent.interaction_history.record_interaction(&tweet_id, "retweet").await?;
+                        debug!("Retweeted: {}", tweet_id);
+                    }
+                },
+                "quote" => {
+                    // Only quote if it meets certain criteria
+                    if self.should_quote(tweet) {
+                        let quote_text = format!("Interesting point! {}", tweet.text.clone().unwrap_or_default());
+                        if let Ok(_) = self.scraper.lock().await.send_tweet(&quote_text, Some(&tweet_id), None).await {
+                            self.agent.interaction_history.record_interaction(&tweet_id, "quote").await?;
+                            debug!("Quoted tweet: {}", tweet_id);
+                        }
+                    }
+                },
+                _ => {}
+            }
+            
+            // Add random delay between actions
+            tokio::time::sleep(tokio::time::Duration::from_secs(
+                self.random_number(30, 60)
+            )).await;
+        }
+        
         Ok(())
     }
 }

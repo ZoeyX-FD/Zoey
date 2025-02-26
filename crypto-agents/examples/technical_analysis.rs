@@ -46,6 +46,7 @@ async fn main() -> Result<()> {
         println!("- openai: gpt-4o-mini, gpt-3.5-turbo");
         println!("- openrouter: google/gemini-2.0-flash-001, deepseek/deepseek-r1");
         println!("- deepseek: deepseek-chat, deepseek-reasoner");
+        println!("- ollama: deepseek-r1:1.5b-qwen-distill-q8_0");
         return Ok(());
     }
     let symbol = &args[1].to_uppercase();
@@ -56,8 +57,9 @@ async fn main() -> Result<()> {
         "openai" => crypto_agents::agents::ModelProvider::OpenAI,
         "openrouter" => crypto_agents::agents::ModelProvider::OpenRouter,
         "deepseek" => crypto_agents::agents::ModelProvider::DeepSeek,
+        "ollama" => crypto_agents::agents::ModelProvider::Ollama,
         _ => {
-            println!("⚠️ Invalid provider. Available options: gemini, mistral, openai, openrouter, deepseek");
+            println!("⚠️ Invalid provider. Available options: gemini, mistral, openai, openrouter, deepseek, ollama");
             return Ok(());
         }
     };

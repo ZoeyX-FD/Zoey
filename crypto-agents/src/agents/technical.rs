@@ -59,7 +59,7 @@ Format your response like this:
 - Key Support/Resistance Confidence: [0-100%]
 
 🎯 FINAL RECOMMENDATION:
-Action: [MUST BE ONE OF: "BUY" / "SELL" / "WAIT"]
+Action: [MUST BE ONE OF: "BUY" / "SELL" / "WAIT" / "DONT BUY"]
 Timeframe: [Short-term/Mid-term/Long-term]
 Reasoning: [Clear, concise reasons for the recommendation]
 Entry Price: [Specify price range for entry, even if WAIT]
@@ -151,7 +151,7 @@ impl TechnicalAgent {
             6. Risk Assessment\n\
             7. Trading Recommendations\n\
             8. Confidence Levels for Each Scenario\n\
-            9. EXPLICIT RECOMMENDATION (BUY/SELL/WAIT) with clear reasoning\n\
+            9. EXPLICIT RECOMMENDATION (BUY/SELL/WAIT/DONT BUY) with clear reasoning\n\
             \n\
             For each analysis point, include a confidence level (0-100%) based on:\n\
             - Technical indicator alignment\n\
