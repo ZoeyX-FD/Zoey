@@ -75,10 +75,10 @@ impl InteractionHistory {
 
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS tweet_interactions (
-                    tweet_id TEXT PRIMARY KEY,
+                    tweet_id TEXT NOT NULL,
                     interaction_type TEXT NOT NULL,
                     timestamp TEXT NOT NULL,
-                    UNIQUE(tweet_id, interaction_type)
+                    PRIMARY KEY (tweet_id, interaction_type)
                 )",
                 (),
             )?;
@@ -237,7 +237,7 @@ impl InteractionHistory {
 
         self.conn.call(move |conn| {
             conn.execute(
-                "INSERT OR REPLACE INTO tweet_interactions 
+                "INSERT OR IGNORE INTO tweet_interactions 
                 (tweet_id, interaction_type, timestamp)
                 VALUES (?, ?, ?)",
                 (tweet_id_owned, interaction_type_owned, timestamp),
